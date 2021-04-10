@@ -6,7 +6,6 @@ dependencies:
   - make
   - ninja
   - nlohmann_json
-  - pybind11
   - libsolv
   - libarchive
   - libcurl
