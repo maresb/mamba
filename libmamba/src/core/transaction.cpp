@@ -87,7 +87,62 @@ namespace mamba
         index_file >> index;
 
         solvable_json = m_package_info.json_record();
-        index.insert(solvable_json.cbegin(), solvable_json.cend());
+        
+        // For explicit URL installations, we need to be careful not to overwrite
+        // complete metadata from the extracted package with incomplete metadata from the URL.
+        // We prioritize the extracted package metadata and only use URL metadata
+        // for fields that are missing or for validation purposes.
+        
+        // Fields that should always come from the extracted package (index.json)
+        // These contain the actual package information and should not be overwritten
+        std::vector<std::string> preserve_from_index = {
+            "depends", "constrains", "license", "license_family", "track_features"
+        };
+        
+        // Fields that can be safely updated from URL metadata if they're missing
+        // or if they're validation fields that should match
+        std::vector<std::string> update_from_url = {
+            "url", "channel", "subdir", "fn", "size", "timestamp"
+        };
+        
+        // Fields that should always come from URL metadata for validation
+        std::vector<std::string> preserve_from_url = {
+            "md5", "sha256"
+        };
+        
+        // First, preserve critical fields from the extracted package
+        for (const auto& field : preserve_from_index)
+        {
+            if (index.contains(field))
+            {
+                // Keep the field from index.json, don't overwrite with URL metadata
+                continue;
+            }
+        }
+        
+        // Update fields from URL metadata if they're missing or for validation
+        for (const auto& field : update_from_url)
+        {
+            if (solvable_json.contains(field) && solvable_json[field] != nullptr)
+            {
+                // Only update if the field is missing from index or if it's a validation field
+                if (!index.contains(field) || index[field].is_null() || 
+                    (field == "timestamp" && index[field] == 0) ||
+                    (field == "size" && index[field] == 0))
+                {
+                    index[field] = solvable_json[field];
+                }
+            }
+        }
+        
+        // Always preserve validation fields from URL metadata
+        for (const auto& field : preserve_from_url)
+        {
+            if (solvable_json.contains(field) && !solvable_json[field].get<std::string>().empty())
+            {
+                index[field] = solvable_json[field];
+            }
+        }
 
         if (index.find("size") == index.end() || index["size"] == 0)
         {
