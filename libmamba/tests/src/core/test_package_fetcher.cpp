@@ -62,6 +62,7 @@ namespace
             nlohmann::json index = {
                 { "license", "BSD-3-Clause" },
                 { "timestamp", 123456u },
+                { "build_number", 7u },
                 { "depends", nlohmann::json::array({ "python >=3.11" }) },
                 { "constrains", nlohmann::json::array({ "pip >=24.0" }) },
                 { "track_features", "mkl" },
@@ -74,6 +75,7 @@ namespace
             const auto j = read_json(info_dir / "repodata_record.json");
             REQUIRE(j.at("license") == "BSD-3-Clause");
             REQUIRE(j.at("timestamp") == 123456);
+            REQUIRE(j.at("build_number") == 7);
             REQUIRE(j.at("depends").is_array());
             REQUIRE(j.at("depends").size() == 1);
             REQUIRE(j.at("constrains").is_array());
