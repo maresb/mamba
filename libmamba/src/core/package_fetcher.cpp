@@ -434,13 +434,61 @@ namespace mamba
         std::ifstream index_file = open_ifstream(index_path);
         index_file >> index;
 
+        // Start from URL/solver-derived PackageInfo JSON
         nlohmann::json repodata_record = m_package_info;
 
-        // To take correction of packages metadata (e.g. made using repodata patches) into account,
-        // we insert the index into the repodata record to only add new fields from the index
-        // while keeping the existing fields from the repodata record.
+        // Determine which keys from repodata_record should be erased before merging
+        std::vector<std::string> keys_to_erase;
+        const bool has_defaulted_keys = !m_package_info.defaulted_keys.empty();
+        if (has_defaulted_keys)
+        {
+            keys_to_erase = m_package_info.defaulted_keys;
+        }
+        else
+        {
+            // Healing path for corrupted caches from older versions
+            const bool timestamp_zero = (m_package_info.timestamp == 0);
+            const bool looks_stub = (m_package_info.license.empty()
+                                     || m_package_info.dependencies.empty()
+                                     || m_package_info.track_features.empty()
+                                     || m_package_info.build_number == 0);
+            if (timestamp_zero && looks_stub)
+            {
+                keys_to_erase = {
+                    "build_number",
+                    "license",
+                    "timestamp",
+                    "track_features",
+                    "depends",
+                    "constrains",
+                };
+            }
+        }
+
+        for (const auto& key : keys_to_erase)
+        {
+            repodata_record.erase(key);
+        }
+
+        // Insert authoritative metadata from index.json after erasing stub fields
         repodata_record.insert(index.cbegin(), index.cend());
 
+        // Authoritative URL-related fields from the URL-derived spec
+        repodata_record["fn"] = m_package_info.filename;
+        repodata_record["url"] = m_package_info.package_url;
+        repodata_record["channel"] = m_package_info.channel;
+
+        // Preserve hashes from URL fragment over index.json if provided
+        if (!m_package_info.md5.empty())
+        {
+            repodata_record["md5"] = m_package_info.md5;
+        }
+        if (!m_package_info.sha256.empty())
+        {
+            repodata_record["sha256"] = m_package_info.sha256;
+        }
+
+        // Backfill size if missing or zero
         if (repodata_record.find("size") == repodata_record.end() || repodata_record["size"] == 0)
         {
             repodata_record["size"] = fs::file_size(m_tarball_path);
