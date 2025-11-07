@@ -175,6 +175,32 @@ namespace mamba::specs
                 out.name = head.value();  // There may be '-' in the name
             }
 
+            // Populate defaulted_keys for URL-derived stubs so index.json can override them
+            if (out.package_type == PackageType::Conda)
+            {
+                out.defaulted_keys = {
+                    "build_number",
+                    "license",
+                    "timestamp",
+                    "track_features",
+                    "depends",
+                    "constrains",
+                };
+            }
+            else if (out.package_type == PackageType::Wheel || out.package_type == PackageType::TarGz)
+            {
+                out.defaulted_keys = {
+                    "build",
+                    "build_string",
+                    "build_number",
+                    "license",
+                    "timestamp",
+                    "track_features",
+                    "depends",
+                    "constrains",
+                };
+            }
+
             return out;
         }
 
@@ -251,6 +277,23 @@ namespace mamba::specs
             {
                 pkg.name = str.substr(idx + pkg_name_marker.length());
             }
+            pkg.defaulted_keys = {
+                "version",
+                "build",
+                "build_string",
+                "build_number",
+                "channel",
+                "subdir",
+                "fn",
+                "license",
+                "timestamp",
+                "track_features",
+                "depends",
+                "constrains",
+                "noarch",
+                "python_site_packages_path",
+                "size",
+            };
             return pkg;
         }
 
