@@ -125,6 +125,56 @@ namespace
 
             REQUIRE(pkg.name == "urllib3");
             REQUIRE(pkg.package_url == url);
+            // Defaulted keys populated for git-based specs
+            REQUIRE_FALSE(pkg.defaulted_keys.empty());
+            // Spot-check a few expected keys
+            REQUIRE(std::find(pkg.defaulted_keys.begin(), pkg.defaulted_keys.end(), "version")
+                    != pkg.defaulted_keys.end());
+            REQUIRE(std::find(pkg.defaulted_keys.begin(), pkg.defaulted_keys.end(), "build")
+                    != pkg.defaulted_keys.end());
+            REQUIRE(std::find(pkg.defaulted_keys.begin(), pkg.defaulted_keys.end(), "size")
+                    != pkg.defaulted_keys.end());
+        }
+    }
+
+    TEST_CASE("PackageInfo::defaulted_keys for URL-derived specs")
+    {
+        using StrVec = std::vector<std::string>;
+
+        SECTION("Conda URL populates defaulted_keys (no build/build_string)")
+        {
+            static constexpr std::string_view url =
+                "https://conda.anaconda.org/conda-forge/linux-64/pkg-6.4-bld.conda";
+            auto pkg = PackageInfo::from_url(url).value();
+
+            const StrVec expected = {
+                "build_number",
+                "license",
+                "timestamp",
+                "track_features",
+                "depends",
+                "constrains",
+            };
+            REQUIRE(pkg.defaulted_keys == expected);
+        }
+
+        SECTION("Wheel URL populates defaulted_keys (includes build/build_string)")
+        {
+            static constexpr std::string_view url =
+                "https://files.pythonhosted.org/packages/aa/bb/cc/pkg-1.2.3-py3-none-any.whl";
+            auto pkg = PackageInfo::from_url(url).value();
+
+            const StrVec expected = {
+                "build",
+                "build_string",
+                "build_number",
+                "license",
+                "timestamp",
+                "track_features",
+                "depends",
+                "constrains",
+            };
+            REQUIRE(pkg.defaulted_keys == expected);
         }
     }
 
