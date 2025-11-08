@@ -439,17 +439,27 @@ namespace mamba
 
         nlohmann::json repodata_record = m_package_info;
 
-        // For explicit spec files (URLs), m_package_info has empty depends/constrains arrays
-        // that would overwrite the correct values from index.json. Remove these empty fields.
-        if (auto depends_it = repodata_record.find("depends");
-            depends_it != repodata_record.end() && depends_it->empty())
+        // Erase all keys that were defaulted (stub values from URL parsing)
+        // This ensures correct metadata from index.json is used instead of stub values
+        for (const auto& key : m_package_info.defaulted_keys)
         {
-            repodata_record.erase("depends");
+            repodata_record.erase(key);
         }
-        if (auto constrains_it = repodata_record.find("constrains");
-            constrains_it != repodata_record.end() && constrains_it->empty())
+
+        // Cache healing: detect corrupted entries from buggy versions (v2.1.1-v2.3.2)
+        // If timestamp is 0 and defaulted_keys is empty, this is likely a corrupted cache entry
+        if (m_package_info.defaulted_keys.empty()
+            && repodata_record.contains("timestamp")
+            && repodata_record["timestamp"] == 0)
         {
-            repodata_record.erase("constrains");
+            // Heal by treating common stub fields as defaulted
+            const std::vector<std::string> stub_fields = {
+                "build_number", "license", "timestamp", "track_features", "depends", "constrains"
+            };
+            for (const auto& key : stub_fields)
+            {
+                repodata_record.erase(key);
+            }
         }
 
         // To take correction of packages metadata (e.g. made using repodata patches) into account,

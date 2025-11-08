@@ -95,6 +95,10 @@ namespace mamba::specs
 
                 // Name
                 out.name = head.value();  // There may be '-' in the name
+
+                // Mark fields that have stub/default values from URL parsing
+                // These will be erased before merging with index.json to ensure correct metadata
+                out.defaulted_keys = { "build_number", "license", "timestamp", "track_features", "depends", "constrains" };
             }
             // PackageType::Wheel (.whl):
             // {pkg name}-{version}-{build tag (optional)}-{python tag}-{abi tag}-{platform tag}.whl
@@ -157,6 +161,10 @@ namespace mamba::specs
                     // Name
                     out.name = head.value();  // There may be '-' in the name
                 }
+
+                // Mark fields that have stub/default values for wheel packages
+                // Wheels have additional defaulted fields: build and build_string
+                out.defaulted_keys = { "build", "build_string", "build_number", "license", "timestamp", "track_features", "depends", "constrains" };
             }
             // PackageType::TarGz (.tar.gz): {pkg name}-{version}.tar.gz
             else if (out.package_type == PackageType::TarGz)
@@ -173,6 +181,10 @@ namespace mamba::specs
 
                 // Name
                 out.name = head.value();  // There may be '-' in the name
+
+                // Mark fields that have stub/default values for tar.gz source distributions
+                // Similar to wheels, build and build_string are not extracted from filename
+                out.defaulted_keys = { "build", "build_string", "build_number", "license", "timestamp", "track_features", "depends", "constrains" };
             }
 
             return out;
@@ -251,6 +263,9 @@ namespace mamba::specs
             {
                 pkg.name = str.substr(idx + pkg_name_marker.length());
             }
+            // Mark nearly all fields as defaulted for git URLs since only package_url and name are populated
+            pkg.defaulted_keys = { "version", "build", "build_string", "build_number", "channel", "filename", 
+                                   "license", "timestamp", "track_features", "depends", "constrains", "platform" };
             return pkg;
         }
 
