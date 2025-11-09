@@ -301,6 +301,7 @@ namespace
         pkg_info.filename = "patched-pkg-1.0-h123456_0.tar.bz2";
         pkg_info.dependencies = {};  // Intentionally empty from repodata patch
         pkg_info.defaulted_keys = {};  // Empty = NOT from URL parsing
+        pkg_info.timestamp = 1234567890;  // Non-zero timestamp from repodata
 
         const std::string pkg_basename = "patched-pkg-1.0-h123456_0";
 

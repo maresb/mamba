@@ -439,9 +439,24 @@ namespace mamba
 
         nlohmann::json repodata_record = m_package_info;
 
-        // Erase fields that were defaulted (stub values from URL parsing)
+        // Detect corrupted cache entries from buggy versions (v2.1.1-v2.3.2)
+        // that wrote stub values with empty defaulted_keys
+        auto defaulted_keys = m_package_info.defaulted_keys;
+        if (defaulted_keys.empty() && repodata_record.contains("timestamp")
+            && repodata_record["timestamp"] == 0)
+        {
+            // Corrupted cache detected - mark stub fields for healing
+            defaulted_keys = { "build_number",
+                               "license",
+                               "timestamp",
+                               "track_features",
+                               "depends",
+                               "constrains" };
+        }
+
+        // Erase fields that were defaulted or corrupted
         // This allows index.json to provide the correct values
-        for (const auto& key : m_package_info.defaulted_keys)
+        for (const auto& key : defaulted_keys)
         {
             repodata_record.erase(key);
         }
