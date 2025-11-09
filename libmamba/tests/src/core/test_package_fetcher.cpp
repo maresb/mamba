@@ -276,7 +276,11 @@ namespace
         REQUIRE(repodata_record["license"] == "MIT");
         REQUIRE(repodata_record["timestamp"] == 1234567890);
         REQUIRE(repodata_record["build_number"] == 42);
-        REQUIRE(repodata_record["track_features"] == "feature1,feature2");
+        // track_features comes from index.json as an array
+        REQUIRE(repodata_record["track_features"].is_array());
+        REQUIRE(repodata_record["track_features"].size() == 2);
+        REQUIRE(repodata_record["track_features"][0] == "feature1");
+        REQUIRE(repodata_record["track_features"][1] == "feature2");
         REQUIRE(repodata_record["depends"].size() == 2);
         REQUIRE(repodata_record["constrains"].size() == 1);
     }
@@ -464,7 +468,10 @@ namespace
         REQUIRE(repodata_record["license"] == "Apache-2.0");  // Healed from index.json
         REQUIRE(repodata_record["timestamp"] == 5555555555);  // Healed from index.json
         REQUIRE(repodata_record["build_number"] == 10);       // Healed from index.json
-        REQUIRE(repodata_record["track_features"] == "cuda"); // Healed from index.json
+        // track_features comes from index.json as an array
+        REQUIRE(repodata_record["track_features"].is_array());
+        REQUIRE(repodata_record["track_features"].size() == 1);
+        REQUIRE(repodata_record["track_features"][0] == "cuda");
         REQUIRE(repodata_record["depends"].size() == 1);      // Healed from index.json
         REQUIRE(repodata_record["depends"][0] == "libgcc");
         REQUIRE(repodata_record["constrains"].size() == 1);   // Healed from index.json
