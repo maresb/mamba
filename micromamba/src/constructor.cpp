@@ -157,12 +157,8 @@ construct(Configuration& config, const fs::u8path& prefix, bool extract_conda_pk
                     && repodata_record["timestamp"] == 0)
                 {
                     // Corrupted cache detected - mark stub fields for healing
-                    defaulted_keys = { "build_number",
-                                       "license",
-                                       "timestamp",
-                                       "track_features",
-                                       "depends",
-                                       "constrains" };
+                    defaulted_keys = { "build_number",   "license", "timestamp",
+                                       "track_features", "depends", "constrains" };
                 }
 
                 // Erase fields that were defaulted or corrupted

@@ -224,8 +224,8 @@ namespace
         index_json["name"] = "test-pkg";
         index_json["version"] = "1.0";
         index_json["build"] = "h123456_0";
-        index_json["build_number"] = 42;  // Correct value, not 0
-        index_json["license"] = "MIT";     // Correct value, not ""
+        index_json["build_number"] = 42;       // Correct value, not 0
+        index_json["license"] = "MIT";         // Correct value, not ""
         index_json["timestamp"] = 1234567890;  // Correct value, not 0
 
         {
@@ -241,14 +241,7 @@ namespace
 
         // Create tar.bz2 archive
         auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
-        create_archive(
-            pkg_extract_dir,
-            tarball_path,
-            compression_algorithm::bzip2,
-            1,
-            1,
-            nullptr
-        );
+        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
         REQUIRE(fs::exists(tarball_path));
 
         // Update pkg_info to use .tar.bz2 format
@@ -278,9 +271,9 @@ namespace
         // BUG: These assertions will FAIL with current implementation
         // because stub defaults from URL parsing are written instead of
         // actual values from index.json
-        CHECK(repodata_record["license"] == "MIT");  // FAILS: gets ""
+        CHECK(repodata_record["license"] == "MIT");         // FAILS: gets ""
         CHECK(repodata_record["timestamp"] == 1234567890);  // FAILS: gets 0
-        CHECK(repodata_record["build_number"] == 42);  // FAILS: gets 0
+        CHECK(repodata_record["build_number"] == 42);       // FAILS: gets 0
     }
 
     TEST_CASE("PackageFetcher::write_repodata_record preserves empty depends patch")
@@ -299,8 +292,8 @@ namespace
         pkg_info.version = "1.0";
         pkg_info.build_string = "h123456_0";
         pkg_info.filename = "patched-pkg-1.0-h123456_0.tar.bz2";
-        pkg_info.dependencies = {};  // Intentionally empty from repodata patch
-        pkg_info.defaulted_keys = {};  // Empty = NOT from URL parsing
+        pkg_info.dependencies = {};       // Intentionally empty from repodata patch
+        pkg_info.defaulted_keys = {};     // Empty = NOT from URL parsing
         pkg_info.timestamp = 1234567890;  // Non-zero timestamp from repodata
 
         const std::string pkg_basename = "patched-pkg-1.0-h123456_0";
@@ -375,9 +368,9 @@ namespace
         pkg_info.version = "1.0";
         pkg_info.build_string = "h123456_0";
         pkg_info.filename = "corrupted-pkg-1.0-h123456_0.tar.bz2";
-        pkg_info.timestamp = 0;  // Corrupted
-        pkg_info.license = "";   // Corrupted
-        pkg_info.build_number = 0;  // Corrupted
+        pkg_info.timestamp = 0;        // Corrupted
+        pkg_info.license = "";         // Corrupted
+        pkg_info.build_number = 0;     // Corrupted
         pkg_info.defaulted_keys = {};  // Empty = looks like it's not from URL
 
         const std::string pkg_basename = "corrupted-pkg-1.0-h123456_0";
@@ -434,6 +427,6 @@ namespace
         // Corrupted values remain because defaulted_keys is empty
         CHECK(repodata_record["license"] == "Apache-2.0");  // FAILS: gets ""
         CHECK(repodata_record["timestamp"] == 9999999999);  // FAILS: gets 0
-        CHECK(repodata_record["build_number"] == 99);  // FAILS: gets 0
+        CHECK(repodata_record["build_number"] == 99);       // FAILS: gets 0
     }
 }
