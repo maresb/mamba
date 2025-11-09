@@ -4,6 +4,7 @@ Release: 2.3.3 (libmamba, mamba, micromamba, libmambapy)
 
 Bug fixes:
 
+- [libmamba] Fix incorrect repodata_record.json metadata for URL-derived packages (issue #4095). URL-derived packages (explicit installs) had corrupted `repodata_record.json` with stub defaults (timestamp=0, license="", build_number=0, etc.) instead of actual metadata from `index.json`. Additionally, channel repodata patches with intentionally empty dependencies were silently undone. The fix leverages the existing `defaulted_keys` field in `PackageInfo` to track which fields have stub values, and when writing `repodata_record.json`, erases only the defaulted keys before merging with `index.json`. This preserves intentional patches while fixing URL-derived stubs. Includes automatic healing for cache entries corrupted by versions v2.1.1-v2.3.2.
 - [libmamba] fix: pass `$argv` for fish wrapper by @sghng in <https://github.com/mamba-org/mamba/pull/4073>
 - [libmamba] Fix empty depends/constrains when installing explicit spec files by @benmoss in <https://github.com/mamba-org/mamba/pull/4071>
 - [libmamba] fix: proxy both micromamba and mamba with fish function by @sghng in <https://github.com/mamba-org/mamba/pull/4065>
