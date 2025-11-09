@@ -448,14 +448,12 @@ namespace mamba
 
         // Cache healing: detect corrupted entries from buggy versions (v2.1.1-v2.3.2)
         // If timestamp is 0 and defaulted_keys is empty, this is likely a corrupted cache entry
-        if (m_package_info.defaulted_keys.empty()
-            && repodata_record.contains("timestamp")
+        if (m_package_info.defaulted_keys.empty() && repodata_record.contains("timestamp")
             && repodata_record["timestamp"] == 0)
         {
             // Heal by treating common stub fields as defaulted
-            const std::vector<std::string> stub_fields = {
-                "build_number", "license", "timestamp", "track_features", "depends", "constrains"
-            };
+            const std::vector<std::string> stub_fields = { "build_number",   "license", "timestamp",
+                                                           "track_features", "depends", "constrains" };
             for (const auto& key : stub_fields)
             {
                 repodata_record.erase(key);

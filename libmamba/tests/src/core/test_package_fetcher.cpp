@@ -324,11 +324,12 @@ namespace
         index_json["name"] = "patched-pkg";
         index_json["version"] = "2.0.0";
         index_json["build"] = "h99999_0";
-        index_json["build_number"] = 1;  // Different from pkg_info
-        index_json["license"] = "GPL";   // Different from pkg_info
-        index_json["timestamp"] = 1111111111;  // Different from pkg_info
+        index_json["build_number"] = 1;                                // Different from pkg_info
+        index_json["license"] = "GPL";                                 // Different from pkg_info
+        index_json["timestamp"] = 1111111111;                          // Different from pkg_info
         index_json["depends"] = nlohmann::json::array({ "old-dep" });  // Different from pkg_info
-        index_json["constrains"] = nlohmann::json::array({ "old-constraint" });  // Different from pkg_info
+        index_json["constrains"] = nlohmann::json::array({ "old-constraint" });  // Different from
+                                                                                 // pkg_info
 
         {
             std::ofstream index_file((info_dir / "index.json").std_path());
@@ -372,7 +373,7 @@ namespace
         REQUIRE(repodata_record["license"] == "BSD-3-Clause");  // From pkg_info, not index.json
         REQUIRE(repodata_record["timestamp"] == 9876543210);    // From pkg_info, not index.json
         REQUIRE(repodata_record["build_number"] == 5);          // From pkg_info, not index.json
-        
+
         // Most importantly: empty arrays should be preserved
         REQUIRE(repodata_record["depends"].is_array());
         REQUIRE(repodata_record["depends"].empty());  // Should be empty, not ["old-dep"]
@@ -472,9 +473,9 @@ namespace
         REQUIRE(repodata_record["track_features"].is_array());
         REQUIRE(repodata_record["track_features"].size() == 1);
         REQUIRE(repodata_record["track_features"][0] == "cuda");
-        REQUIRE(repodata_record["depends"].size() == 1);      // Healed from index.json
+        REQUIRE(repodata_record["depends"].size() == 1);  // Healed from index.json
         REQUIRE(repodata_record["depends"][0] == "libgcc");
-        REQUIRE(repodata_record["constrains"].size() == 1);   // Healed from index.json
+        REQUIRE(repodata_record["constrains"].size() == 1);  // Healed from index.json
         REQUIRE(repodata_record["constrains"][0] == "cuda <12");
     }
 }
