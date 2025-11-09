@@ -268,91 +268,10 @@ namespace
         nlohmann::json repodata_record;
         repodata_file >> repodata_record;
 
-        // BUG: These will FAIL - gets stub defaults instead of index.json values
-        CHECK(repodata_record["license"] == "MIT");         // FAILS: gets ""
-        CHECK(repodata_record["timestamp"] == 1234567890);  // FAILS: gets 0
-        CHECK(repodata_record["build_number"] == 42);       // FAILS: gets 0
-    }
-
-    TEST_CASE("PackageFetcher::write_repodata_record git URL metadata")
-    {
-        // Test that git URL packages use metadata from index.json
-        // Git URLs don't provide version/build info, so all metadata must come from index.json
-
-        auto& ctx = mambatests::context();
-        TemporaryDirectory temp_dir;
-        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
-
-        static constexpr std::string_view url = "git+https://github.com/test/repo#egg=git-pkg";
-        auto pkg_info = specs::PackageInfo::from_url(url).value();
-
-        // Git URLs provide even less info than regular URLs
-        REQUIRE(pkg_info.name == "git-pkg");
-        REQUIRE(pkg_info.timestamp == 0);
-        REQUIRE(pkg_info.license == "");
-        REQUIRE(pkg_info.build_number == 0);
-
-        const std::string pkg_basename = "git-pkg-1.0-h123456_0";
-
-        // Create package structure
-        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
-        auto info_dir = pkg_extract_dir / "info";
-        fs::create_directories(info_dir);
-
-        // Create index.json with correct metadata
-        nlohmann::json index_json;
-        index_json["name"] = "git-pkg";
-        index_json["version"] = "1.0";
-        index_json["build"] = "h123456_0";
-        index_json["build_number"] = 123;
-        index_json["license"] = "BSD-3-Clause";
-        index_json["timestamp"] = 1700000000;
-
-        {
-            std::ofstream index_file((info_dir / "index.json").std_path());
-            index_file << index_json.dump(2);
-        }
-
-        {
-            std::ofstream paths_file((info_dir / "paths.json").std_path());
-            paths_file << R"({"paths": [], "paths_version": 1})";
-        }
-
-        // Create tar.bz2 archive
-        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
-        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
-        REQUIRE(fs::exists(tarball_path));
-
-        // Update pkg_info
-        auto modified_pkg_info = pkg_info;
-        modified_pkg_info.filename = pkg_basename + ".tar.bz2";
-        modified_pkg_info.version = "1.0";
-        modified_pkg_info.build_string = "h123456_0";
-
-        // Clean up and re-extract
-        fs::remove_all(pkg_extract_dir);
-
-        PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
-
-        ExtractOptions options;
-        options.sparse = false;
-        options.subproc_mode = extract_subproc_mode::mamba_package;
-
-        bool extract_success = pkg_fetcher.extract(options);
-        REQUIRE(extract_success);
-
-        // Read repodata_record.json
-        auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
-        REQUIRE(fs::exists(repodata_record_path));
-
-        std::ifstream repodata_file(repodata_record_path.std_path());
-        nlohmann::json repodata_record;
-        repodata_file >> repodata_record;
-
-        // BUG: These will FAIL - gets stub defaults instead of index.json values
-        CHECK(repodata_record["license"] == "BSD-3-Clause");  // FAILS: gets ""
-        CHECK(repodata_record["timestamp"] == 1700000000);    // FAILS: gets 0
-        CHECK(repodata_record["build_number"] == 123);        // FAILS: gets 0
+        // Verify that actual values from index.json are used, not stub defaults
+        CHECK(repodata_record["license"] == "MIT");
+        CHECK(repodata_record["timestamp"] == 1234567890);
+        CHECK(repodata_record["build_number"] == 42);
     }
 
     TEST_CASE("PackageFetcher::write_repodata_record preserves empty depends patch")
@@ -388,7 +307,6 @@ namespace
         index_json["name"] = "patched-pkg";
         index_json["version"] = "1.0";
         index_json["build"] = "h123456_0";
-        index_json["build_number"] = 1;
         index_json["depends"] = nlohmann::json::array({ "broken-dependency" });
 
         {
@@ -396,6 +314,161 @@ namespace
             index_file << index_json.dump(2);
         }
 
+        {
+            std::ofstream paths_file((info_dir / "paths.json").std_path());
+            paths_file << R"({"paths": [], "paths_version": 1})";
+        }
+
+        // Create archive
+        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
+        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
+        REQUIRE(fs::exists(tarball_path));
+
+        fs::remove_all(pkg_extract_dir);
+
+        PackageFetcher pkg_fetcher{ pkg_info, package_caches };
+
+        ExtractOptions options;
+        options.sparse = false;
+        options.subproc_mode = extract_subproc_mode::mamba_package;
+
+        bool extract_success = pkg_fetcher.extract(options);
+        REQUIRE(extract_success);
+
+        // Read repodata_record.json
+        auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
+        REQUIRE(fs::exists(repodata_record_path));
+
+        std::ifstream repodata_file(repodata_record_path.std_path());
+        nlohmann::json repodata_record;
+        repodata_file >> repodata_record;
+
+        // Verify that the intentionally empty depends from the patch is preserved
+        REQUIRE(repodata_record.contains("depends"));
+        CHECK(repodata_record["depends"].empty());
+    }
+
+    TEST_CASE("PackageFetcher::write_repodata_record prevents new corruption")
+    {
+        // Test that NEW extractions with buggy PackageInfo (empty defaulted_keys + stubs)
+        // correctly replace stub values with index.json via the prevention mechanism.
+        // NOTE: This is PREVENTION of future corruption, not healing of existing caches.
+
+        auto& ctx = mambatests::context();
+        TemporaryDirectory temp_dir;
+        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
+
+        // Create PackageInfo with corrupted stub values
+        // and EMPTY defaulted_keys (simulating packages cached by buggy versions)
+        specs::PackageInfo pkg_info;
+        pkg_info.name = "corrupted-pkg";
+        pkg_info.version = "1.0";
+        pkg_info.build_string = "h123456_0";
+        pkg_info.filename = "corrupted-pkg-1.0-h123456_0.tar.bz2";
+        pkg_info.timestamp = 0;        // Corrupted
+        pkg_info.license = "";         // Corrupted
+        pkg_info.build_number = 0;     // Corrupted
+        pkg_info.defaulted_keys = {};  // Empty = looks like it's not from URL
+
+        const std::string pkg_basename = "corrupted-pkg-1.0-h123456_0";
+
+        // Create package structure
+        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
+        auto info_dir = pkg_extract_dir / "info";
+        fs::create_directories(info_dir);
+
+        // Create index.json with CORRECT values
+        nlohmann::json index_json;
+        index_json["name"] = "corrupted-pkg";
+        index_json["version"] = "1.0";
+        index_json["build"] = "h123456_0";
+        index_json["build_number"] = 99;
+        index_json["license"] = "Apache-2.0";
+        index_json["timestamp"] = 9999999999;
+
+        {
+            std::ofstream index_file((info_dir / "index.json").std_path());
+            index_file << index_json.dump(2);
+        }
+
+        {
+            std::ofstream paths_file((info_dir / "paths.json").std_path());
+            paths_file << R"({"paths": [], "paths_version": 1})";
+        }
+
+        // Create archive
+        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
+        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
+        REQUIRE(fs::exists(tarball_path));
+
+        fs::remove_all(pkg_extract_dir);
+
+        PackageFetcher pkg_fetcher{ pkg_info, package_caches };
+
+        ExtractOptions options;
+        options.sparse = false;
+        options.subproc_mode = extract_subproc_mode::mamba_package;
+
+        bool extract_success = pkg_fetcher.extract(options);
+        REQUIRE(extract_success);
+
+        // Read repodata_record.json
+        auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
+        REQUIRE(fs::exists(repodata_record_path));
+
+        std::ifstream repodata_file(repodata_record_path.std_path());
+        nlohmann::json repodata_record;
+        repodata_file >> repodata_record;
+
+        // Verify that prevention mechanism detects stub signature and uses index.json
+        CHECK(repodata_record["license"] == "Apache-2.0");
+        CHECK(repodata_record["timestamp"] == 9999999999);
+        CHECK(repodata_record["build_number"] == 99);
+    }
+
+    TEST_CASE("PackageFetcher::write_repodata_record git URL metadata")
+    {
+        // Test that git URL packages use actual metadata from index.json
+        // instead of stub defaults (similar to regular URL-derived packages)
+
+        auto& ctx = mambatests::context();
+        TemporaryDirectory temp_dir;
+        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
+
+        // Create PackageInfo from git URL - this should have stub default values
+        static constexpr std::string_view git_url = "git+https://github.com/org/repo@v1.0#egg=test-git-pkg";
+        auto pkg_info = specs::PackageInfo::from_url(git_url).value();
+
+        // Verify precondition: PackageInfo from git URL has stub defaults
+        REQUIRE(pkg_info.name == "test-git-pkg");
+        REQUIRE(pkg_info.timestamp == 0);
+        REQUIRE(pkg_info.license == "");
+        REQUIRE(pkg_info.build_number == 0);
+
+        // For git packages, we need to create a fake filename since it's not parsed from the URL
+        const std::string pkg_basename = "test-git-pkg-1.0-py_0";
+        pkg_info.filename = pkg_basename + ".tar.bz2";
+
+        // Create a minimal but valid package structure
+        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
+        auto info_dir = pkg_extract_dir / "info";
+        fs::create_directories(info_dir);
+
+        // Create index.json with CORRECT metadata values
+        nlohmann::json index_json;
+        index_json["name"] = "test-git-pkg";
+        index_json["version"] = "1.0";
+        index_json["build"] = "py_0";
+        index_json["build_number"] = 123;        // Correct value, not 0
+        index_json["license"] = "BSD-3-Clause";  // Correct value, not ""
+        index_json["timestamp"] = 1700000000;    // Correct value, not 0
+
+        {
+            std::ofstream index_file((info_dir / "index.json").std_path());
+            index_file << index_json.dump(2);
+        }
+
+        // Create minimal required metadata files
         {
             std::ofstream paths_file((info_dir / "paths.json").std_path());
             paths_file << R"({"paths": [], "paths_version": 1})";
@@ -426,14 +499,17 @@ namespace
         nlohmann::json repodata_record;
         repodata_file >> repodata_record;
 
-        // BUG: This will FAIL - the empty array patch gets overwritten with index.json value
-        CHECK(repodata_record["depends"].empty());  // FAILS: gets ["broken-dependency"]
+        // Verify that git URL packages use actual values from index.json, not stub defaults
+        CHECK(repodata_record["license"] == "BSD-3-Clause");
+        CHECK(repodata_record["timestamp"] == 1700000000);
+        CHECK(repodata_record["build_number"] == 123);
     }
 
     TEST_CASE("PackageFetcher heals existing corrupted cache")
     {
         // Test that EXISTING corrupted caches (from v2.1.1-v2.3.3) are detected,
         // invalidated, and automatically re-extracted with correct metadata.
+        // This is TRUE HEALING, not just prevention.
 
         auto& ctx = mambatests::context();
         TemporaryDirectory temp_dir;
@@ -449,21 +525,19 @@ namespace
         auto info_dir = pkg_extract_dir / "info";
         fs::create_directories(info_dir);
 
-        // index.json with CORRECT values that should be used
-        nlohmann::json index_json;
-        index_json["name"] = "healing-test";
-        index_json["version"] = "1.0";
-        index_json["build"] = "h123456_0";
-        index_json["build_number"] = 42;
-        index_json["license"] = "MIT";
-        index_json["timestamp"] = 1234567890;
+        nlohmann::json correct_index;
+        correct_index["name"] = "healing-test";
+        correct_index["version"] = "1.0";
+        correct_index["build"] = "h123456_0";
+        correct_index["build_number"] = 42;
+        correct_index["license"] = "MIT";
+        correct_index["timestamp"] = 1234567890;
 
         {
             std::ofstream index_file((info_dir / "index.json").std_path());
-            index_file << index_json.dump(2);
+            index_file << correct_index.dump(2);
         }
 
-        // Create minimal required metadata files
         {
             std::ofstream paths_file((info_dir / "paths.json").std_path());
             paths_file << R"({"paths": [], "paths_version": 1})";
@@ -499,13 +573,11 @@ namespace
         auto modified_pkg_info = pkg_info;
         modified_pkg_info.filename = pkg_basename + ".tar.bz2";
 
-        // Step 5: Create PackageFetcher - it should detect corruption and re-extract
+        // Step 5: Create PackageFetcher - it detects corruption and triggers re-extraction
         PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
 
-        // BUG: With current code, has_valid_extracted_dir() returns true despite corruption
-        // because it only validates checksums, not metadata correctness.
-        // So needs_extract() returns false and the corrupted cache is used as-is.
-        REQUIRE(pkg_fetcher.needs_extract());  // FAILS: returns false, should return true
+        // Verify that corruption was detected and cache was invalidated
+        REQUIRE(pkg_fetcher.needs_extract());
 
         ExtractOptions options;
         options.sparse = false;
@@ -522,9 +594,9 @@ namespace
         nlohmann::json healed_repodata;
         repodata_file >> healed_repodata;
 
-        // BUG: These will FAIL because cache wasn't invalidated, so re-extraction didn't happen
-        CHECK(healed_repodata["license"] == "MIT");         // FAILS: still ""
-        CHECK(healed_repodata["timestamp"] == 1234567890);  // FAILS: still 0
-        CHECK(healed_repodata["build_number"] == 42);       // FAILS: still 0
+        // Verify corruption was healed - correct values from index.json now present
+        CHECK(healed_repodata["license"] == "MIT");
+        CHECK(healed_repodata["timestamp"] == 1234567890);
+        CHECK(healed_repodata["build_number"] == 42);
     }
 }
