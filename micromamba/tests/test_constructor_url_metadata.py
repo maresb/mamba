@@ -1,0 +1,129 @@
+import hashlib
+import json
+import subprocess
+import tarfile
+import tempfile
+from pathlib import Path
+
+from . import helpers
+
+
+def test_constructor_url_derived_metadata():
+    """
+    Test that constructor properly handles URL-derived packages by using
+    index.json metadata instead of stub defaults from repodata cache.
+
+    This tests the fix for GitHub issue #4095 where URL-derived packages
+    would write stub values (timestamp=0, license="") to repodata_record.json.
+    """
+    umamba = helpers.get_umamba()
+
+    with tempfile.TemporaryDirectory() as tmpdir_prefix, tempfile.TemporaryDirectory() as tmpdir_build:
+        prefix = Path(tmpdir_prefix) / "prefix"
+        pkgs_dir = prefix / "pkgs"
+        cache_dir = pkgs_dir / "cache"
+        cache_dir.mkdir(parents=True)
+
+        # Create package structure in separate temp directory
+        pkg_name = "test-url-pkg-1.0-h12345_0.tar.bz2"
+        build_dir = Path(tmpdir_build)
+        info_dir = build_dir / "info"
+        info_dir.mkdir(parents=True)
+
+        # Create index.json with CORRECT metadata
+        index_json = {
+            "name": "test-url-pkg",
+            "version": "1.0",
+            "build": "h12345_0",
+            "build_number": 42,
+            "license": "MIT",
+            "timestamp": 1234567890,
+            "depends": ["python >=3.8"],
+        }
+
+        (info_dir / "index.json").write_text(json.dumps(index_json))
+
+        # Create paths.json (required)
+        (info_dir / "paths.json").write_text(json.dumps({"paths": [], "paths_version": 1}))
+
+        # Create tarball
+        pkg_tarball = pkgs_dir / pkg_name
+        with tarfile.open(pkg_tarball, "w:bz2") as tar:
+            # Add info directory contents
+            tar.add(info_dir, arcname="info")
+
+        # Create repodata cache with STUB VALUES (simulating v2.1.1-v2.3.3 bug)
+        repodata_cache = {
+            "info": {"subdir": "linux-64"},
+            "packages": {
+                pkg_name: {
+                    "name": "test-url-pkg",
+                    "version": "1.0",
+                    "build": "h12345_0",
+                    "build_number": 0,  # STUB
+                    "license": "",  # STUB
+                    "timestamp": 0,  # STUB
+                    "depends": ["python >=3.8"],
+                    "md5": "abc123",
+                    "sha256": "def456",
+                    "size": 1000,
+                }
+            },
+            "packages.conda": {},
+        }
+
+        # Need to compute the cache filename the same way constructor does
+        # cache_name_from_url() creates a hash of the channel URL
+        channel_url = "http://testchannel.com/linux-64/"
+        cache_name = hashlib.md5(channel_url.encode()).hexdigest()[:8]
+        cache_file = cache_dir / f"{cache_name}.json"
+
+        cache_file.write_text(json.dumps(repodata_cache))
+
+        # Create urls file
+        url = f"http://testchannel.com/linux-64/{pkg_name}#abc123"
+        (pkgs_dir / "urls").write_text(url)
+
+        # Run constructor
+        cmd = [umamba, "constructor", "--prefix", str(prefix), "--extract-conda-pkgs"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            print(f"STDOUT: {result.stdout}")
+            print(f"STDERR: {result.stderr}")
+            raise RuntimeError(f"Constructor failed: {result.stderr}")
+
+        # Verify repodata_record.json was created
+        pkg_extract_dir = pkgs_dir / pkg_name.replace(".tar.bz2", "")
+        repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json"
+        assert repodata_record_path.exists(), (
+            f"repodata_record.json not created at {repodata_record_path}"
+        )
+
+        repodata_record = json.loads(repodata_record_path.read_text())
+
+        # CRITICAL ASSERTIONS: These will FAIL without the fix
+        # With bug (v2.1.1-v2.3.3): Gets stub values from repodata cache
+        # With fix: Stubs erased, gets correct values from index.json
+
+        assert repodata_record["license"] == "MIT", (
+            f"Expected license='MIT', got '{repodata_record.get('license', 'MISSING')}'. "
+            f"Bug: stub value from repodata cache not replaced by index.json"
+        )
+
+        assert repodata_record["timestamp"] == 1234567890, (
+            f"Expected timestamp=1234567890, got {repodata_record.get('timestamp', 'MISSING')}. "
+            f"Bug: stub value from repodata cache not replaced by index.json"
+        )
+
+        assert repodata_record["build_number"] == 42, (
+            f"Expected build_number=42, got {repodata_record.get('build_number', 'MISSING')}'. "
+            f"Bug: stub value from repodata cache not replaced by index.json"
+        )
+
+        # Also verify we didn't break the basic functionality
+        assert repodata_record["name"] == "test-url-pkg"
+        assert repodata_record["version"] == "1.0"
+        assert repodata_record["fn"] == pkg_name
+        # Note: Constructor strips the hash from the URL
+        assert url.startswith(repodata_record["url"])

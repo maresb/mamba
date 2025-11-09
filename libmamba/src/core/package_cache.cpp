@@ -360,6 +360,19 @@ namespace mamba
                             }
                         }
                     }
+
+                    // Detect corruption from buggy versions (v2.1.1-v2.3.3) AFTER all other
+                    // validations to avoid being overwritten by checksum validation logic. See
+                    // GitHub issue #4095 for details on the corruption bug.
+                    if (valid && repodata_record.contains("timestamp")
+                        && repodata_record["timestamp"] == 0 && repodata_record.contains("license")
+                        && repodata_record["license"] == "")
+                    {
+                        LOG_INFO << "Detected corrupted metadata in cache (v2.1.1-v2.3.3 bug, "
+                                    "issue #4095), will re-extract: "
+                                 << extracted_dir.string();
+                        valid = false;
+                    }
                 }
                 catch (const nlohmann::json::exception& e)
                 {
