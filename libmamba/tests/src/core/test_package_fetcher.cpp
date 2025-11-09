@@ -193,4 +193,240 @@ namespace
         REQUIRE(repodata_record["constrains"].size() == 1);
         REQUIRE(repodata_record["constrains"][0] == "pytz");
     }
+
+    TEST_CASE("PackageFetcher::write_repodata_record URL-derived metadata")
+    {
+        // Test that URL-derived packages use actual metadata from index.json
+        // instead of stub defaults (timestamp=0, license="", build_number=0)
+
+        auto& ctx = mambatests::context();
+        TemporaryDirectory temp_dir;
+        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
+
+        // Create PackageInfo from URL - this will have stub default values
+        static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/test-pkg-1.0-h123456_0.conda";
+        auto pkg_info = specs::PackageInfo::from_url(url).value();
+
+        // Verify precondition: PackageInfo from URL has stub defaults
+        REQUIRE(pkg_info.timestamp == 0);
+        REQUIRE(pkg_info.license == "");
+        REQUIRE(pkg_info.build_number == 0);
+
+        const std::string pkg_basename = "test-pkg-1.0-h123456_0";
+
+        // Create a minimal but valid conda package structure
+        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
+        auto info_dir = pkg_extract_dir / "info";
+        fs::create_directories(info_dir);
+
+        // Create index.json with CORRECT metadata values
+        nlohmann::json index_json;
+        index_json["name"] = "test-pkg";
+        index_json["version"] = "1.0";
+        index_json["build"] = "h123456_0";
+        index_json["build_number"] = 42;       // Correct value, not 0
+        index_json["license"] = "MIT";         // Correct value, not ""
+        index_json["timestamp"] = 1234567890;  // Correct value, not 0
+
+        {
+            std::ofstream index_file((info_dir / "index.json").std_path());
+            index_file << index_json.dump(2);
+        }
+
+        // Create minimal required metadata files
+        {
+            std::ofstream paths_file((info_dir / "paths.json").std_path());
+            paths_file << R"({"paths": [], "paths_version": 1})";
+        }
+
+        // Create tar.bz2 archive
+        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
+        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
+        REQUIRE(fs::exists(tarball_path));
+
+        // Update pkg_info to use .tar.bz2 format
+        auto modified_pkg_info = pkg_info;
+        modified_pkg_info.filename = pkg_basename + ".tar.bz2";
+
+        // Clean up and re-extract
+        fs::remove_all(pkg_extract_dir);
+
+        PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
+
+        ExtractOptions options;
+        options.sparse = false;
+        options.subproc_mode = extract_subproc_mode::mamba_package;
+
+        bool extract_success = pkg_fetcher.extract(options);
+        REQUIRE(extract_success);
+
+        // Read repodata_record.json
+        auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
+        REQUIRE(fs::exists(repodata_record_path));
+
+        std::ifstream repodata_file(repodata_record_path.std_path());
+        nlohmann::json repodata_record;
+        repodata_file >> repodata_record;
+
+        // BUG: These will FAIL - gets stub defaults instead of index.json values
+        CHECK(repodata_record["license"] == "MIT");         // FAILS: gets ""
+        CHECK(repodata_record["timestamp"] == 1234567890);  // FAILS: gets 0
+        CHECK(repodata_record["build_number"] == 42);       // FAILS: gets 0
+    }
+
+    TEST_CASE("PackageFetcher::write_repodata_record git URL metadata")
+    {
+        // Test that git URL packages use metadata from index.json
+        // Git URLs don't provide version/build info, so all metadata must come from index.json
+
+        auto& ctx = mambatests::context();
+        TemporaryDirectory temp_dir;
+        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
+
+        static constexpr std::string_view url = "git+https://github.com/test/repo#egg=git-pkg";
+        auto pkg_info = specs::PackageInfo::from_url(url).value();
+
+        // Git URLs provide even less info than regular URLs
+        REQUIRE(pkg_info.name == "git-pkg");
+        REQUIRE(pkg_info.timestamp == 0);
+        REQUIRE(pkg_info.license == "");
+        REQUIRE(pkg_info.build_number == 0);
+
+        const std::string pkg_basename = "git-pkg-1.0-h123456_0";
+
+        // Create package structure
+        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
+        auto info_dir = pkg_extract_dir / "info";
+        fs::create_directories(info_dir);
+
+        // Create index.json with correct metadata
+        nlohmann::json index_json;
+        index_json["name"] = "git-pkg";
+        index_json["version"] = "1.0";
+        index_json["build"] = "h123456_0";
+        index_json["build_number"] = 123;
+        index_json["license"] = "BSD-3-Clause";
+        index_json["timestamp"] = 1700000000;
+
+        {
+            std::ofstream index_file((info_dir / "index.json").std_path());
+            index_file << index_json.dump(2);
+        }
+
+        {
+            std::ofstream paths_file((info_dir / "paths.json").std_path());
+            paths_file << R"({"paths": [], "paths_version": 1})";
+        }
+
+        // Create tar.bz2 archive
+        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
+        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
+        REQUIRE(fs::exists(tarball_path));
+
+        // Update pkg_info
+        auto modified_pkg_info = pkg_info;
+        modified_pkg_info.filename = pkg_basename + ".tar.bz2";
+        modified_pkg_info.version = "1.0";
+        modified_pkg_info.build_string = "h123456_0";
+
+        // Clean up and re-extract
+        fs::remove_all(pkg_extract_dir);
+
+        PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
+
+        ExtractOptions options;
+        options.sparse = false;
+        options.subproc_mode = extract_subproc_mode::mamba_package;
+
+        bool extract_success = pkg_fetcher.extract(options);
+        REQUIRE(extract_success);
+
+        // Read repodata_record.json
+        auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
+        REQUIRE(fs::exists(repodata_record_path));
+
+        std::ifstream repodata_file(repodata_record_path.std_path());
+        nlohmann::json repodata_record;
+        repodata_file >> repodata_record;
+
+        // BUG: These will FAIL - gets stub defaults instead of index.json values
+        CHECK(repodata_record["license"] == "BSD-3-Clause");  // FAILS: gets ""
+        CHECK(repodata_record["timestamp"] == 1700000000);    // FAILS: gets 0
+        CHECK(repodata_record["build_number"] == 123);        // FAILS: gets 0
+    }
+
+    TEST_CASE("PackageFetcher::write_repodata_record preserves empty depends patch")
+    {
+        // Test that channel patches with intentionally empty dependencies
+        // are preserved and not overwritten by index.json
+
+        auto& ctx = mambatests::context();
+        TemporaryDirectory temp_dir;
+        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
+
+        // Create PackageInfo with empty depends (simulating patched repodata)
+        // and EMPTY defaulted_keys (indicating this is NOT from URL parsing)
+        specs::PackageInfo pkg_info;
+        pkg_info.name = "patched-pkg";
+        pkg_info.version = "1.0";
+        pkg_info.build_string = "h123456_0";
+        pkg_info.filename = "patched-pkg-1.0-h123456_0.tar.bz2";
+        pkg_info.dependencies = {};       // Intentionally empty from repodata patch
+        pkg_info.defaulted_keys = {};     // Empty = NOT from URL parsing
+        pkg_info.timestamp = 1234567890;  // Non-zero timestamp from repodata
+
+        const std::string pkg_basename = "patched-pkg-1.0-h123456_0";
+
+        // Create package structure
+        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
+        auto info_dir = pkg_extract_dir / "info";
+        fs::create_directories(info_dir);
+
+        // Create index.json with broken dependency
+        // (This represents the package's original, buggy metadata)
+        nlohmann::json index_json;
+        index_json["name"] = "patched-pkg";
+        index_json["version"] = "1.0";
+        index_json["build"] = "h123456_0";
+        index_json["build_number"] = 1;
+        index_json["depends"] = nlohmann::json::array({ "broken-dependency" });
+
+        {
+            std::ofstream index_file((info_dir / "index.json").std_path());
+            index_file << index_json.dump(2);
+        }
+
+        {
+            std::ofstream paths_file((info_dir / "paths.json").std_path());
+            paths_file << R"({"paths": [], "paths_version": 1})";
+        }
+
+        // Create tar.bz2 archive
+        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
+        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
+        REQUIRE(fs::exists(tarball_path));
+
+        // Clean up and re-extract
+        fs::remove_all(pkg_extract_dir);
+
+        PackageFetcher pkg_fetcher{ pkg_info, package_caches };
+
+        ExtractOptions options;
+        options.sparse = false;
+        options.subproc_mode = extract_subproc_mode::mamba_package;
+
+        bool extract_success = pkg_fetcher.extract(options);
+        REQUIRE(extract_success);
+
+        // Read repodata_record.json
+        auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
+        REQUIRE(fs::exists(repodata_record_path));
+
+        std::ifstream repodata_file(repodata_record_path.std_path());
+        nlohmann::json repodata_record;
+        repodata_file >> repodata_record;
+
+        // BUG: This will FAIL - the empty array patch gets overwritten with index.json value
+        CHECK(repodata_record["depends"].empty());  // FAILS: gets ["broken-dependency"]
+    }
 }
