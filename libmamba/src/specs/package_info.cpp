@@ -95,6 +95,9 @@ namespace mamba::specs
 
                 // Name
                 out.name = head.value();  // There may be '-' in the name
+
+                // Mark fields that have stub/default values for URL-derived conda packages
+                out.defaulted_keys = { "build_number", "license", "timestamp", "track_features", "depends", "constrains" };
             }
             // PackageType::Wheel (.whl):
             // {pkg name}-{version}-{build tag (optional)}-{python tag}-{abi tag}-{platform tag}.whl
@@ -140,6 +143,9 @@ namespace mamba::specs
                     out.version = tail;
                     // The head is the name
                     out.name = head.value();  // There may be '-' in the name
+
+                    // Mark fields that have stub/default values for URL-derived wheel packages
+                    out.defaulted_keys = { "build", "build_string", "build_number", "license", "timestamp", "track_features", "depends", "constrains" };
                 }
                 else
                 {
@@ -156,6 +162,9 @@ namespace mamba::specs
 
                     // Name
                     out.name = head.value();  // There may be '-' in the name
+
+                    // Mark fields that have stub/default values for URL-derived wheel packages
+                    out.defaulted_keys = { "build", "build_string", "build_number", "license", "timestamp", "track_features", "depends", "constrains" };
                 }
             }
             // PackageType::TarGz (.tar.gz): {pkg name}-{version}.tar.gz
@@ -173,6 +182,9 @@ namespace mamba::specs
 
                 // Name
                 out.name = head.value();  // There may be '-' in the name
+
+                // Mark fields that have stub/default values for URL-derived tar.gz packages
+                out.defaulted_keys = { "build", "build_string", "build_number", "license", "timestamp", "track_features", "depends", "constrains" };
             }
 
             return out;
