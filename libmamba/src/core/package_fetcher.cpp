@@ -478,6 +478,41 @@ namespace mamba
         // while keeping the existing fields from the repodata record.
         repodata_record.insert(index.cbegin(), index.cend());
 
+        // Ensure depends and constrains are always present as arrays.
+        // Example: nlohmann_json-abi is missing depends in index.json, but conda adds it to
+        // repodata_record.json as an empty list.
+        if (!repodata_record.contains("depends"))
+        {
+            repodata_record["depends"] = nlohmann::json::array();
+        }
+        if (!repodata_record.contains("constrains"))
+        {
+            repodata_record["constrains"] = nlohmann::json::array();
+        }
+
+        // track_features should only be included if non-empty.
+        // Example: markupsafe and pyyaml have non-empty track_features.
+        if (repodata_record.contains("track_features"))
+        {
+            auto& tf = repodata_record["track_features"];
+            bool is_empty = (tf.is_string() && tf.get<std::string>().empty())
+                            || (tf.is_array() && tf.empty());
+            if (is_empty)
+            {
+                repodata_record.erase("track_features");
+            }
+        }
+
+        // Omit arch and platform when null.
+        if (repodata_record.contains("arch") && repodata_record["arch"].is_null())
+        {
+            repodata_record.erase("arch");
+        }
+        if (repodata_record.contains("platform") && repodata_record["platform"].is_null())
+        {
+            repodata_record.erase("platform");
+        }
+
         if (repodata_record.find("size") == repodata_record.end() || repodata_record["size"] == 0)
         {
             repodata_record["size"] = fs::file_size(m_tarball_path);
