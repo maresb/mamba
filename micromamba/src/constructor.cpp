@@ -13,6 +13,7 @@
 #include "mamba/core/subdir_index.hpp"
 #include "mamba/core/util.hpp"
 #include "mamba/util/string.hpp"
+#include "mamba/validation/tools.hpp"
 
 
 using namespace mamba;  // NOLINT(build/namespaces)
@@ -209,9 +210,61 @@ construct(Configuration& config, const fs::u8path& prefix, bool extract_conda_pk
             repodata_record["url"] = pkg_info.package_url;
             repodata_record["channel"] = pkg_info.channel;
 
+            // Ensure depends and constrains are always present as arrays.
+            // Example: nlohmann_json-abi is missing depends in index.json, but conda adds it to
+            // repodata_record.json as an empty list.
+            if (!repodata_record.contains("depends"))
+            {
+                repodata_record["depends"] = nlohmann::json::array();
+            }
+            if (!repodata_record.contains("constrains"))
+            {
+                repodata_record["constrains"] = nlohmann::json::array();
+            }
+
+            // track_features should only be included if non-empty.
+            // Example: markupsafe and pyyaml have non-empty track_features.
+            if (repodata_record.contains("track_features"))
+            {
+                auto& tf = repodata_record["track_features"];
+                bool is_empty = (tf.is_string() && tf.get<std::string>().empty())
+                                || (tf.is_array() && tf.empty());
+                if (is_empty)
+                {
+                    repodata_record.erase("track_features");
+                }
+            }
+
+            // Omit arch and platform when null.
+            if (repodata_record.contains("arch") && repodata_record["arch"].is_null())
+            {
+                repodata_record.erase("arch");
+            }
+            if (repodata_record.contains("platform") && repodata_record["platform"].is_null())
+            {
+                repodata_record.erase("platform");
+            }
+
             if (repodata_record.find("size") == repodata_record.end() || repodata_record["size"] == 0)
             {
                 repodata_record["size"] = fs::file_size(entry);
+            }
+
+            // Ensure both md5 and sha256 checksums are always present.
+            // We compute any missing checksums from the tarball.
+            bool has_md5 = repodata_record.contains("md5") && repodata_record["md5"].is_string()
+                           && !repodata_record["md5"].get<std::string>().empty();
+            bool has_sha256 = repodata_record.contains("sha256")
+                              && repodata_record["sha256"].is_string()
+                              && !repodata_record["sha256"].get<std::string>().empty();
+
+            if (!has_md5)
+            {
+                repodata_record["md5"] = validation::md5sum(entry);
+            }
+            if (!has_sha256)
+            {
+                repodata_record["sha256"] = validation::sha256sum(entry);
             }
 
             LOG_TRACE << "Writing " << repodata_record_path;

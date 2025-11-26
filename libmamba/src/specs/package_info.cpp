@@ -507,7 +507,11 @@ namespace mamba::specs
             j["noarch"] = pkg.noarch;
         }
         j["license"] = pkg.license;
-        j["track_features"] = fmt::format("{}", fmt::join(pkg.track_features, ","));  // Conda fmt
+        // Only include track_features if non-empty (matches conda behavior)
+        if (!pkg.track_features.empty())
+        {
+            j["track_features"] = fmt::format("{}", fmt::join(pkg.track_features, ","));
+        }
         if (!pkg.md5.empty())
         {
             j["md5"] = pkg.md5;
