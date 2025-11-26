@@ -518,6 +518,23 @@ namespace mamba
             repodata_record["size"] = fs::file_size(m_tarball_path);
         }
 
+        // Ensure both md5 and sha256 checksums are always present.
+        // When installing from an explicit lockfile, typically only md5 is available.
+        // We compute any missing checksums from the tarball.
+        bool has_md5 = repodata_record.contains("md5") && repodata_record["md5"].is_string()
+                       && !repodata_record["md5"].get<std::string>().empty();
+        bool has_sha256 = repodata_record.contains("sha256") && repodata_record["sha256"].is_string()
+                          && !repodata_record["sha256"].get<std::string>().empty();
+
+        if (!has_md5)
+        {
+            repodata_record["md5"] = validation::md5sum(m_tarball_path);
+        }
+        if (!has_sha256)
+        {
+            repodata_record["sha256"] = validation::sha256sum(m_tarball_path);
+        }
+
         std::ofstream repodata_record_file(repodata_record_path.std_path());
         repodata_record_file << repodata_record.dump(4);
     }

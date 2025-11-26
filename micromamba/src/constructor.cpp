@@ -13,6 +13,7 @@
 #include "mamba/core/subdir_index.hpp"
 #include "mamba/core/util.hpp"
 #include "mamba/util/string.hpp"
+#include "mamba/validation/tools.hpp"
 
 
 using namespace mamba;  // NOLINT(build/namespaces)
@@ -247,6 +248,23 @@ construct(Configuration& config, const fs::u8path& prefix, bool extract_conda_pk
             if (repodata_record.find("size") == repodata_record.end() || repodata_record["size"] == 0)
             {
                 repodata_record["size"] = fs::file_size(entry);
+            }
+
+            // Ensure both md5 and sha256 checksums are always present.
+            // We compute any missing checksums from the tarball.
+            bool has_md5 = repodata_record.contains("md5") && repodata_record["md5"].is_string()
+                           && !repodata_record["md5"].get<std::string>().empty();
+            bool has_sha256 = repodata_record.contains("sha256")
+                              && repodata_record["sha256"].is_string()
+                              && !repodata_record["sha256"].get<std::string>().empty();
+
+            if (!has_md5)
+            {
+                repodata_record["md5"] = validation::md5sum(entry);
+            }
+            if (!has_sha256)
+            {
+                repodata_record["sha256"] = validation::sha256sum(entry);
             }
 
             LOG_TRACE << "Writing " << repodata_record_path;
