@@ -193,4 +193,348 @@ namespace
         REQUIRE(repodata_record["constrains"].size() == 1);
         REQUIRE(repodata_record["constrains"][0] == "pytz");
     }
+
+    TEST_CASE("PackageFetcher::write_repodata_record preserves all metadata from index.json")
+    {
+        // PURPOSE: Verify that URL-derived packages get correct metadata from index.json
+        // instead of stub defaults (timestamp=0, license="", build_number=0)
+        // MOTIVATION: Issue #4095 - explicit lockfile installs have wrong metadata
+        // SETUP: Create PackageInfo from URL (has stub values), create package with index.json
+        // containing correct values
+        // ASSERTIONS: repodata_record.json gets correct values from index.json, not stub defaults
+
+        auto& ctx = mambatests::context();
+        TemporaryDirectory temp_dir;
+        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
+
+        // Create PackageInfo from URL - this will have stub default values
+        static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/test-pkg-1.0-h123456_0.conda";
+        auto pkg_info = specs::PackageInfo::from_url(url).value();
+
+        // Verify precondition: PackageInfo from URL has stub defaults
+        REQUIRE(pkg_info.timestamp == 0);
+        REQUIRE(pkg_info.license == "");
+        REQUIRE(pkg_info.build_number == 0);
+
+        const std::string pkg_basename = "test-pkg-1.0-h123456_0";
+
+        // Create a minimal but valid conda package structure
+        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
+        auto info_dir = pkg_extract_dir / "info";
+        fs::create_directories(info_dir);
+
+        // Create index.json with CORRECT metadata values
+        nlohmann::json index_json;
+        index_json["name"] = "test-pkg";
+        index_json["version"] = "1.0";
+        index_json["build"] = "h123456_0";
+        index_json["build_number"] = 42;       // Correct value, not 0
+        index_json["license"] = "MIT";         // Correct value, not ""
+        index_json["timestamp"] = 1234567890;   // Correct value, not 0
+        index_json["track_features"] = "mkl";  // Non-empty track_features
+
+        {
+            std::ofstream index_file((info_dir / "index.json").std_path());
+            index_file << index_json.dump(2);
+        }
+
+        // Create minimal required metadata files
+        {
+            std::ofstream paths_file((info_dir / "paths.json").std_path());
+            paths_file << R"({"paths": [], "paths_version": 1})";
+        }
+
+        // Create tar.bz2 archive
+        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
+        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
+        REQUIRE(fs::exists(tarball_path));
+
+        // Update pkg_info to use .tar.bz2 format
+        auto modified_pkg_info = pkg_info;
+        modified_pkg_info.filename = pkg_basename + ".tar.bz2";
+
+        // Clean up and re-extract
+        fs::remove_all(pkg_extract_dir);
+
+        PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
+
+        ExtractOptions options;
+        options.sparse = false;
+        options.subproc_mode = extract_subproc_mode::mamba_package;
+
+        bool extract_success = pkg_fetcher.extract(options);
+        REQUIRE(extract_success);
+
+        // Read repodata_record.json
+        auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
+        REQUIRE(fs::exists(repodata_record_path));
+
+        std::ifstream repodata_file(repodata_record_path.std_path());
+        nlohmann::json repodata_record;
+        repodata_file >> repodata_record;
+
+        // Verify that actual values from index.json are used, not stub defaults
+        CHECK(repodata_record["license"] == "MIT");
+        CHECK(repodata_record["timestamp"] == 1234567890);
+        CHECK(repodata_record["build_number"] == 42);
+    }
+
+    TEST_CASE("PackageFetcher::write_repodata_record preserves channel-patched empty depends")
+    {
+        // PURPOSE: Verify that intentionally empty depends[] from channel repodata patches
+        // are preserved in repodata_record.json, not overwritten by index.json.
+        // MOTIVATION: Issue #4095 - the v2.3.3 partial fix unconditionally erased empty
+        // depends[], which silently undid channel patches that fix broken dependencies.
+        // SETUP: Create a solver-derived PackageInfo with:
+        // - depends = [] (intentionally empty from channel patch)
+        // - defaulted_keys = {"_initialized"} (solver-derived, trust all fields)
+        // - timestamp != 0 (non-stub value proves this is solver-derived)
+        // ASSERTIONS:
+        // - repodata_record["depends"] must be empty array (patch preserved)
+        // - NOT ["broken-dep"] from index.json (patch would be undone)
+
+        auto& ctx = mambatests::context();
+        TemporaryDirectory temp_dir;
+        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
+
+        // Create PackageInfo with empty depends (simulating patched repodata)
+        // and defaulted_keys = {"_initialized"} (indicating this is solver-derived)
+        specs::PackageInfo pkg_info;
+        pkg_info.name = "patched-pkg";
+        pkg_info.version = "1.0";
+        pkg_info.build_string = "h123456_0";
+        pkg_info.filename = "patched-pkg-1.0-h123456_0.tar.bz2";
+        pkg_info.dependencies = {};              // Intentionally empty from repodata patch
+        pkg_info.defaulted_keys = { "_initialized" };  // Solver-derived: trust all fields
+        pkg_info.timestamp = 1234567890;        // Non-zero timestamp from repodata
+
+        const std::string pkg_basename = "patched-pkg-1.0-h123456_0";
+
+        // Create package structure
+        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
+        auto info_dir = pkg_extract_dir / "info";
+        fs::create_directories(info_dir);
+
+        // Create index.json with broken dependency
+        // (This represents the package's original, buggy metadata)
+        nlohmann::json index_json;
+        index_json["name"] = "patched-pkg";
+        index_json["version"] = "1.0";
+        index_json["build"] = "h123456_0";
+        index_json["build_number"] = 1;
+        index_json["depends"] = nlohmann::json::array({ "broken-dependency" });
+
+        {
+            std::ofstream index_file((info_dir / "index.json").std_path());
+            index_file << index_json.dump(2);
+        }
+
+        {
+            std::ofstream paths_file((info_dir / "paths.json").std_path());
+            paths_file << R"({"paths": [], "paths_version": 1})";
+        }
+
+        // Create tar.bz2 archive
+        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
+        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
+        REQUIRE(fs::exists(tarball_path));
+
+        // Clean up and re-extract
+        fs::remove_all(pkg_extract_dir);
+
+        PackageFetcher pkg_fetcher{ pkg_info, package_caches };
+
+        ExtractOptions options;
+        options.sparse = false;
+        options.subproc_mode = extract_subproc_mode::mamba_package;
+
+        bool extract_success = pkg_fetcher.extract(options);
+        REQUIRE(extract_success);
+
+        // Read repodata_record.json
+        auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
+        REQUIRE(fs::exists(repodata_record_path));
+
+        std::ifstream repodata_file(repodata_record_path.std_path());
+        nlohmann::json repodata_record;
+        repodata_file >> repodata_record;
+
+        // Verify that the intentionally empty depends from the patch is preserved
+        REQUIRE(repodata_record.contains("depends"));
+        CHECK(repodata_record["depends"].is_array());
+        CHECK(repodata_record["depends"].empty());  // Patch preserved, not overwritten
+    }
+
+    TEST_CASE("PackageFetcher::write_repodata_record preserves channel-patched empty constrains")
+    {
+        // PURPOSE: Verify that intentionally empty constrains[] from channel repodata patches
+        // are preserved in repodata_record.json, not overwritten by index.json.
+        // MOTIVATION: Issue #4095 - same as depends, constrains patches must be preserved
+        // SETUP: Create a solver-derived PackageInfo with empty constrains from patch
+        // ASSERTIONS: repodata_record["constrains"] must be empty array (patch preserved)
+
+        auto& ctx = mambatests::context();
+        TemporaryDirectory temp_dir;
+        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
+
+        // Create PackageInfo with empty constrains (simulating patched repodata)
+        specs::PackageInfo pkg_info;
+        pkg_info.name = "patched-pkg-constrains";
+        pkg_info.version = "1.0";
+        pkg_info.build_string = "h123456_0";
+        pkg_info.filename = "patched-pkg-constrains-1.0-h123456_0.tar.bz2";
+        pkg_info.constrains = {};               // Intentionally empty from repodata patch
+        pkg_info.defaulted_keys = { "_initialized" };  // Solver-derived: trust all fields
+        pkg_info.timestamp = 1234567890;        // Non-zero timestamp from repodata
+
+        const std::string pkg_basename = "patched-pkg-constrains-1.0-h123456_0";
+
+        // Create package structure
+        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
+        auto info_dir = pkg_extract_dir / "info";
+        fs::create_directories(info_dir);
+
+        // Create index.json with broken constraint
+        nlohmann::json index_json;
+        index_json["name"] = "patched-pkg-constrains";
+        index_json["version"] = "1.0";
+        index_json["build"] = "h123456_0";
+        index_json["constrains"] = nlohmann::json::array({ "broken-constraint" });
+
+        {
+            std::ofstream index_file((info_dir / "index.json").std_path());
+            index_file << index_json.dump(2);
+        }
+
+        {
+            std::ofstream paths_file((info_dir / "paths.json").std_path());
+            paths_file << R"({"paths": [], "paths_version": 1})";
+        }
+
+        // Create tar.bz2 archive
+        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
+        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
+        REQUIRE(fs::exists(tarball_path));
+
+        // Clean up and re-extract
+        fs::remove_all(pkg_extract_dir);
+
+        PackageFetcher pkg_fetcher{ pkg_info, package_caches };
+
+        ExtractOptions options;
+        options.sparse = false;
+        options.subproc_mode = extract_subproc_mode::mamba_package;
+
+        bool extract_success = pkg_fetcher.extract(options);
+        REQUIRE(extract_success);
+
+        // Read repodata_record.json
+        auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
+        REQUIRE(fs::exists(repodata_record_path));
+
+        std::ifstream repodata_file(repodata_record_path.std_path());
+        nlohmann::json repodata_record;
+        repodata_file >> repodata_record;
+
+        // Verify that the intentionally empty constrains from the patch is preserved
+        REQUIRE(repodata_record.contains("constrains"));
+        CHECK(repodata_record["constrains"].is_array());
+        CHECK(repodata_record["constrains"].empty());  // Patch preserved, not overwritten
+    }
+
+    TEST_CASE("PackageFetcher heals existing corrupted cache")
+    {
+        // PURPOSE: Verify that EXISTING corrupted caches (from v2.1.1-v2.4.0) are detected,
+        // invalidated, and automatically re-extracted with correct metadata.
+        // MOTIVATION: Issue #4095 - corrupted caches from buggy versions need automatic healing
+        // SETUP: Create a corrupted repodata_record.json with stub values (timestamp=0, license="")
+        // ASSERTIONS:
+        // - Corruption is detected (has_valid_extracted_dir returns false)
+        // - Cache is invalidated (needs_extract returns true)
+        // - Re-extraction happens with correct metadata from index.json
+
+        auto& ctx = mambatests::context();
+        TemporaryDirectory temp_dir;
+        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
+
+        // Step 1: Create PackageInfo from URL
+        static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/healing-test-1.0-h123456_0.conda";
+        auto pkg_info = specs::PackageInfo::from_url(url).value();
+
+        const std::string pkg_basename = "healing-test-1.0-h123456_0";
+
+        // Step 2: Create package structure with CORRECT index.json
+        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
+        auto info_dir = pkg_extract_dir / "info";
+        fs::create_directories(info_dir);
+
+        nlohmann::json correct_index;
+        correct_index["name"] = "healing-test";
+        correct_index["version"] = "1.0";
+        correct_index["build"] = "h123456_0";
+        correct_index["build_number"] = 42;
+        correct_index["license"] = "MIT";
+        correct_index["timestamp"] = 1234567890;
+
+        {
+            std::ofstream index_file((info_dir / "index.json").std_path());
+            index_file << correct_index.dump(2);
+        }
+
+        {
+            std::ofstream paths_file((info_dir / "paths.json").std_path());
+            paths_file << R"({"paths": [], "paths_version": 1})";
+        }
+
+        // Step 3: Create tar.bz2 archive
+        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
+        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
+        REQUIRE(fs::exists(tarball_path));
+
+        // Step 4: Create CORRUPTED repodata_record.json (simulating v2.1.1-v2.4.0 bug)
+        // This has stub values that should be replaced by index.json
+        nlohmann::json corrupted_repodata;
+        corrupted_repodata["name"] = "healing-test";
+        corrupted_repodata["version"] = "1.0";
+        corrupted_repodata["build"] = "h123456_0";
+        corrupted_repodata["build_number"] = 0;      // Corrupted (stub)
+        corrupted_repodata["license"] = "";           // Corrupted (stub)
+        corrupted_repodata["timestamp"] = 0;         // Corrupted (stub)
+        corrupted_repodata["url"] = url;
+        corrupted_repodata["md5"] = "";  // No checksum to avoid validation issues
+
+        {
+            std::ofstream repodata_file((info_dir / "repodata_record.json").std_path());
+            repodata_file << corrupted_repodata.dump(2);
+        }
+
+        // Step 5: Create PackageFetcher - it should detect corruption and trigger re-extraction
+        auto modified_pkg_info = pkg_info;
+        modified_pkg_info.filename = pkg_basename + ".tar.bz2";
+
+        PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
+
+        // Verify that corruption was detected and cache was invalidated
+        REQUIRE(pkg_fetcher.needs_extract());
+
+        ExtractOptions options;
+        options.sparse = false;
+        options.subproc_mode = extract_subproc_mode::mamba_package;
+
+        bool extract_success = pkg_fetcher.extract(options);
+        REQUIRE(extract_success);
+
+        // Step 6: Read healed repodata_record.json
+        auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
+        REQUIRE(fs::exists(repodata_record_path));
+
+        std::ifstream repodata_file(repodata_record_path.std_path());
+        nlohmann::json healed_repodata;
+        repodata_file >> healed_repodata;
+
+        // Verify corruption was healed - correct values from index.json now present
+        CHECK(healed_repodata["license"] == "MIT");
+        CHECK(healed_repodata["timestamp"] == 1234567890);
+        CHECK(healed_repodata["build_number"] == 42);
+    }
 }
