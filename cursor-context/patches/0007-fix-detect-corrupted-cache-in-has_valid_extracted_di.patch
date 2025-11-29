@@ -1,0 +1,68 @@
+From 74d7db85cc3a6735b062233f181b9eba42420031 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Sat, 29 Nov 2025 00:38:57 +0000
+Subject: [PATCH 07/13] fix: detect corrupted cache in
+ has_valid_extracted_dir() (GREEN)
+
+Add corruption detection to has_valid_extracted_dir() to heal caches
+corrupted by v2.1.1-v2.4.0 bug.
+
+Corruption signature: timestamp == 0 AND license == ""
+
+When detected:
+1. Log info message about the corruption detection
+2. Return valid=false to invalidate the cache entry
+3. This triggers re-extraction from the tarball
+4. write_repodata_record() then writes correct values using index.json
+
+Why this signature is reliable:
+- timestamp=0 is extremely rare for legitimate packages (build tools set it)
+- Both conditions must be true (reduces false positives)
+- license="" alone could be legitimate (some packages have no license)
+- timestamp=0 alone could theoretically be legitimate
+- Together they reliably indicate v2.1.1-v2.4.0 corruption
+
+The detection is placed AFTER all other validations to ensure it's the
+final check before returning valid status.
+
+Test Status: ALL TESTS PASS (GREEN phase)
+- test cases: 5 | 5 passed
+- assertions: 33 | 33 passed
+
+Tests fixed:
+- PackageFetcher heals existing corrupted cache
+
+Related: https://github.com/mamba-org/mamba/issues/4095
+---
+ libmamba/src/core/package_cache.cpp | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/libmamba/src/core/package_cache.cpp b/libmamba/src/core/package_cache.cpp
+index cd49e6b7..0e6de80f 100644
+--- a/libmamba/src/core/package_cache.cpp
++++ b/libmamba/src/core/package_cache.cpp
+@@ -359,6 +359,22 @@ namespace mamba
+                             }
+                         }
+                     }
++
++                    // HEALING: Detect corrupted cache from buggy versions (v2.1.1-v2.4.0).
++                    // These versions wrote stub values (timestamp=0, license="") to
++                    // repodata_record.json for URL-derived packages. By returning valid=false
++                    // here, we trigger re-extraction, and write_repodata_record() will write
++                    // correct values using index.json.
++                    // See GitHub issue #4095 for details.
++                    if (valid && repodata_record.contains("timestamp")
++                        && repodata_record["timestamp"] == 0 && repodata_record.contains("license")
++                        && repodata_record["license"] == "")
++                    {
++                        LOG_INFO << "Detected corrupted metadata in cache (v2.1.1-v2.4.0 bug, "
++                                    "issue #4095), will re-extract: "
++                                 << extracted_dir.string();
++                        valid = false;
++                    }
+                 }
+                 catch (const nlohmann::json::exception& e)
+                 {
+--
+2.50.1
