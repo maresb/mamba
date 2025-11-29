@@ -1,0 +1,45 @@
+[project]
+name = "mamba"
+version = "0.1.0"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+# C++ build dependencies
+cxx-compiler = "<1.11"
+sysroot_linux-64 = "2.17"
+cmake = ">=3.16"
+pkg-config = "*"
+ninja = "*"
+make = "*"
+# libmamba dependencies
+cpp-expected = "*"
+fmt = ">=12.0.0"
+libarchive = ">=3.8"
+libcurl = ">=7.86"
+libsodium = "*"
+libsolv = ">=0.7.18"
+nlohmann_json = "*"
+reproc-cpp = ">=14.2.4.post0"
+simdjson = ">=3.3.0"
+spdlog = ">=1.16.0"
+yaml-cpp = ">=0.8.0"
+# libmamba test dependencies
+catch2 = "*"
+# micromamba dependencies
+cli11 = ">=2.2"
+# Python test dependencies
+python = "*"
+pytest = ">=7.3.0"
+pytest-asyncio = "*"
+pytest-timeout = "*"
+pytest-xprocess = "*"
+pytest-rerunfailures = "*"
+pytest-cov = "*"
+requests = "*"
+cryptography = "*"
+# libmambapy build dependencies
+scikit-build-core = "*"
+pybind11 = ">=3.0.0"
+# dev dependencies
+pre-commit = "*"
