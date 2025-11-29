@@ -95,6 +95,11 @@ namespace mamba::specs
 
                 // Name
                 out.name = head.value();  // There may be '-' in the name
+
+                // Mark fields that have stub/default values for URL-derived conda packages.
+                // Sentinel for fail-hard verification; can be removed later if desired.
+                out.defaulted_keys = { "_initialized", "build_number", "license", "timestamp",
+                                       "track_features", "depends", "constrains" };
             }
             // PackageType::Wheel (.whl):
             // {pkg name}-{version}-{build tag (optional)}-{python tag}-{abi tag}-{platform tag}.whl
@@ -156,6 +161,25 @@ namespace mamba::specs
 
                     // Name
                     out.name = head.value();  // There may be '-' in the name
+
+                    // Mark fields that have stub/default values for URL-derived wheel packages.
+                    // Sentinel for fail-hard verification; can be removed later if desired.
+                    out.defaulted_keys = { "_initialized", "build",   "build_string", "build_number",
+                                           "license",      "timestamp", "track_features", "depends",
+                                           "constrains" };
+                }
+                else
+                {
+                    // The tail is the version
+                    out.version = tail;
+                    // The head is the name
+                    out.name = head.value();  // There may be '-' in the name
+
+                    // Mark fields that have stub/default values for URL-derived wheel packages.
+                    // Sentinel for fail-hard verification; can be removed later if desired.
+                    out.defaulted_keys = { "_initialized", "build",   "build_string", "build_number",
+                                           "license",      "timestamp", "track_features", "depends",
+                                           "constrains" };
                 }
             }
             // PackageType::TarGz (.tar.gz): {pkg name}-{version}.tar.gz
@@ -173,6 +197,12 @@ namespace mamba::specs
 
                 // Name
                 out.name = head.value();  // There may be '-' in the name
+
+                // Mark fields that have stub/default values for URL-derived tar.gz packages.
+                // Sentinel for fail-hard verification; can be removed later if desired.
+                out.defaulted_keys = { "_initialized", "build",     "build_string",   "build_number",
+                                       "license",      "timestamp", "track_features", "depends",
+                                       "constrains" };
             }
 
             return out;
@@ -251,6 +281,14 @@ namespace mamba::specs
             {
                 pkg.name = str.substr(idx + pkg_name_marker.length());
             }
+
+            // Mark fields that have stub/default values for URL-derived git packages.
+            // Git URLs only populate package_url and optionally name (from #egg= marker).
+            // All other fields use struct defaults. Sentinel for fail-hard verification;
+            // can be removed later if desired.
+            pkg.defaulted_keys = { "_initialized", "version", "channel", "subdir", "fn", "timestamp",
+                                   "build",        "build_string", "build_number", "license",
+                                   "track_features", "depends", "constrains" };
             return pkg;
         }
 
@@ -489,7 +527,11 @@ namespace mamba::specs
             j["noarch"] = pkg.noarch;
         }
         j["license"] = pkg.license;
-        j["track_features"] = fmt::format("{}", fmt::join(pkg.track_features, ","));  // Conda fmt
+        // Only include track_features if non-empty (matches conda behavior)
+        if (!pkg.track_features.empty())
+        {
+            j["track_features"] = fmt::format("{}", fmt::join(pkg.track_features, ","));
+        }
         if (!pkg.md5.empty())
         {
             j["md5"] = pkg.md5;
