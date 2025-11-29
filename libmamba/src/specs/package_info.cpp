@@ -274,9 +274,11 @@ namespace mamba::specs
             auto pkg = PackageInfo();
             pkg.package_url = str;
             const std::string pkg_name_marker = "#egg=";
+            bool has_egg_name = false;
             if (const auto idx = str.rfind(pkg_name_marker); idx != std::string_view::npos)
             {
                 pkg.name = str.substr(idx + pkg_name_marker.length());
+                has_egg_name = true;
             }
 
             // Mark fields that have stub/default values for git URL packages.
@@ -287,6 +289,11 @@ namespace mamba::specs
                                    "build_string", "build_number",  "license",
                                    "timestamp",    "track_features", "depends",
                                    "constrains" };
+            // If #egg= is absent, name is also defaulted (empty string)
+            if (!has_egg_name)
+            {
+                pkg.defaulted_keys.push_back("name");
+            }
             return pkg;
         }
 
