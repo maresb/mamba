@@ -382,7 +382,9 @@ namespace mamba
                     //
                     // See GitHub issue #4095.
                     if (valid && repodata_record.contains("timestamp")
+                        && repodata_record["timestamp"].is_number()
                         && repodata_record["timestamp"] == 0 && repodata_record.contains("license")
+                        && repodata_record["license"].is_string()
                         && repodata_record["license"] == "")
                     {
                         LOG_INFO << "Detected corrupted metadata in cache (v2.1.1-v2.4.0 bug, "
