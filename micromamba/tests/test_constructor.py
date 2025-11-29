@@ -174,17 +174,18 @@ class TestURLDerivedMetadata:
     @classmethod
     def teardown_class(cls):
         """Clean up test directory and restore env vars."""
-        shutil.rmtree(cls.temp_dir)
-
-        # Properly restore env vars (delete if originally unset)
-        if cls.orig_root_prefix is not None:
-            os.environ["MAMBA_ROOT_PREFIX"] = cls.orig_root_prefix
-        else:
-            os.environ.pop("MAMBA_ROOT_PREFIX", None)
-        if cls.orig_prefix is not None:
-            os.environ["CONDA_PREFIX"] = cls.orig_prefix
-        else:
-            os.environ.pop("CONDA_PREFIX", None)
+        try:
+            shutil.rmtree(cls.temp_dir)
+        finally:
+            # Always restore env vars, even if rmtree fails
+            if cls.orig_root_prefix is not None:
+                os.environ["MAMBA_ROOT_PREFIX"] = cls.orig_root_prefix
+            else:
+                os.environ.pop("MAMBA_ROOT_PREFIX", None)
+            if cls.orig_prefix is not None:
+                os.environ["CONDA_PREFIX"] = cls.orig_prefix
+            else:
+                os.environ.pop("CONDA_PREFIX", None)
 
     def test_url_derived_metadata_from_index_json(self):
         """
