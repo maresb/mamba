@@ -443,5 +443,36 @@ namespace
             CHECK_FALSE(contains(pkg.defaulted_keys, "name"));
             CHECK_FALSE(contains(pkg.defaulted_keys, "url"));
         }
+
+        SECTION("Git URL without #egg= has name in defaulted_keys")
+        {
+            // PURPOSE: Verify git URLs WITHOUT #egg= fragment mark name as defaulted
+            // REASON: Without #egg=, the name cannot be derived from the URL
+            static constexpr std::string_view url = "git+https://github.com/urllib3/urllib3.git@1.19.1";
+            auto pkg = PackageInfo::from_url(url).value();
+
+            // Must have _initialized sentinel
+            REQUIRE(contains(pkg.defaulted_keys, "_initialized"));
+
+            // All the same fields as with #egg=
+            CHECK(contains(pkg.defaulted_keys, "build"));
+            CHECK(contains(pkg.defaulted_keys, "build_string"));
+            CHECK(contains(pkg.defaulted_keys, "build_number"));
+            CHECK(contains(pkg.defaulted_keys, "license"));
+            CHECK(contains(pkg.defaulted_keys, "timestamp"));
+            CHECK(contains(pkg.defaulted_keys, "track_features"));
+            CHECK(contains(pkg.defaulted_keys, "depends"));
+            CHECK(contains(pkg.defaulted_keys, "constrains"));
+            CHECK(contains(pkg.defaulted_keys, "version"));
+            CHECK(contains(pkg.defaulted_keys, "channel"));
+            CHECK(contains(pkg.defaulted_keys, "subdir"));
+            CHECK(contains(pkg.defaulted_keys, "fn"));
+
+            // WITHOUT #egg=, name should ALSO be defaulted (cannot be derived)
+            CHECK(contains(pkg.defaulted_keys, "name"));
+
+            // url is always set
+            CHECK_FALSE(contains(pkg.defaulted_keys, "url"));
+        }
     }
 }
