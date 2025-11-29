@@ -4,6 +4,9 @@
 //
 // The full license is in the file LICENSE, distributed with this software.
 
+#include <algorithm>
+#include <stdexcept>
+
 #include "mamba/core/invoke.hpp"
 #include "mamba/core/output.hpp"
 #include "mamba/core/package_fetcher.hpp"
@@ -439,17 +442,52 @@ namespace mamba
 
         nlohmann::json repodata_record = m_package_info;
 
-        // For explicit spec files (URLs), m_package_info has empty depends/constrains arrays
-        // that would overwrite the correct values from index.json. Remove these empty fields.
-        if (auto depends_it = repodata_record.find("depends");
-            depends_it != repodata_record.end() && depends_it->empty())
+        // Write repodata_record.json with correct metadata from index.json.
+        //
+        // The defaulted_keys mechanism:
+        // - All PackageInfo creation paths MUST set defaulted_keys with "_initialized" sentinel
+        // - URL-derived packages: defaulted_keys contains stub field names to erase
+        // - Solver-derived packages: defaulted_keys = {"_initialized"} (no stubs to erase)
+        //
+        // Flow:
+        // 1. Verify "_initialized" sentinel is present (fail hard if not)
+        // 2. Erase all keys listed in defaulted_keys (except "_initialized")
+        // 3. Merge with index.json via insert() to fill erased keys
+        // 4. Solver-derived values are preserved (nothing erased)
+        //
+        // Healing of OLD corrupted caches (v2.1.1-v2.4.0):
+        // - Detected in has_valid_extracted_dir() via stub signature (timestamp=0, license="")
+        // - Cache invalidated → re-extraction triggered
+        // - Fresh from_url() call populates defaulted_keys correctly
+        // - This code then writes correct values
+        //
+        // See GitHub issue #4095 for details on the original corruption bug.
+
+        // All PackageInfo creation paths must set _initialized. If missing, this is a bug.
+        const auto& defaulted_keys = m_package_info.defaulted_keys;
+        const bool has_initialized = std::find(
+                                         defaulted_keys.cbegin(),
+                                         defaulted_keys.cend(),
+                                         "_initialized"
+                                     ) != defaulted_keys.cend();
+
+        if (!has_initialized)
         {
-            repodata_record.erase("depends");
+            throw std::logic_error(
+                "PackageInfo missing _initialized sentinel in defaulted_keys. "
+                "This indicates a bug in the code path that created this PackageInfo. "
+                "See GitHub issue #4095."
+            );
         }
-        if (auto constrains_it = repodata_record.find("constrains");
-            constrains_it != repodata_record.end() && constrains_it->empty())
+
+        // Erase stub keys (excluding _initialized sentinel) before merging with index.json.
+        // This allows correct values from index.json to replace stub defaults.
+        for (const auto& key : defaulted_keys)
         {
-            repodata_record.erase("constrains");
+            if (key != "_initialized")
+            {
+                repodata_record.erase(key);
+            }
         }
 
         // To take correction of packages metadata (e.g. made using repodata patches) into account,
@@ -457,9 +495,61 @@ namespace mamba
         // while keeping the existing fields from the repodata record.
         repodata_record.insert(index.cbegin(), index.cend());
 
+        // Ensure depends and constrains are always present as arrays.
+        // Example: nlohmann_json-abi is missing depends in index.json, but conda adds it to
+        // repodata_record.json as an empty list.
+        if (!repodata_record.contains("depends"))
+        {
+            repodata_record["depends"] = nlohmann::json::array();
+        }
+        if (!repodata_record.contains("constrains"))
+        {
+            repodata_record["constrains"] = nlohmann::json::array();
+        }
+
+        // track_features should only be included if non-empty.
+        // Example: markupsafe and pyyaml have non-empty track_features.
+        if (repodata_record.contains("track_features"))
+        {
+            auto& tf = repodata_record["track_features"];
+            bool is_empty = (tf.is_string() && tf.get<std::string>().empty())
+                            || (tf.is_array() && tf.empty());
+            if (is_empty)
+            {
+                repodata_record.erase("track_features");
+            }
+        }
+
+        // Omit arch and platform when null.
+        if (repodata_record.contains("arch") && repodata_record["arch"].is_null())
+        {
+            repodata_record.erase("arch");
+        }
+        if (repodata_record.contains("platform") && repodata_record["platform"].is_null())
+        {
+            repodata_record.erase("platform");
+        }
+
         if (repodata_record.find("size") == repodata_record.end() || repodata_record["size"] == 0)
         {
             repodata_record["size"] = fs::file_size(m_tarball_path);
+        }
+
+        // Ensure both md5 and sha256 checksums are always present.
+        // When installing from an explicit lockfile, typically only md5 is available.
+        // We compute any missing checksums from the tarball.
+        bool has_md5 = repodata_record.contains("md5") && repodata_record["md5"].is_string()
+                       && !repodata_record["md5"].get<std::string>().empty();
+        bool has_sha256 = repodata_record.contains("sha256") && repodata_record["sha256"].is_string()
+                          && !repodata_record["sha256"].get<std::string>().empty();
+
+        if (!has_md5)
+        {
+            repodata_record["md5"] = validation::md5sum(m_tarball_path);
+        }
+        if (!has_sha256)
+        {
+            repodata_record["sha256"] = validation::sha256sum(m_tarball_path);
         }
 
         std::ofstream repodata_record_file(repodata_record_path.std_path());
