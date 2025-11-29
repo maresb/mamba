@@ -299,7 +299,13 @@ namespace mamba
                 update_urls_txt();
                 update_monitor(cb, PackageExtractEvent::extract_success);
             }
-            catch (std::exception& e)
+            catch (const std::logic_error&)
+            {
+                // std::logic_error indicates a programming bug (e.g., missing _initialized
+                // sentinel). Re-throw to fail hard - these should never be silently ignored.
+                throw;
+            }
+            catch (const std::exception& e)
             {
                 Console::instance().print(filename() + " extraction failed");
                 LOG_ERROR << "Error when extracting package: " << e.what();
