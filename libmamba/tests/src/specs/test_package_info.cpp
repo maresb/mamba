@@ -303,4 +303,138 @@ namespace
             REQUIRE(hash_fn(pkg) != hash_fn(pkg2));
         }
     }
+
+    TEST_CASE("PackageInfo::from_url defaulted_keys population")
+    {
+        // PURPOSE: Verify that defaulted_keys is correctly populated when parsing URLs
+        // MOTIVATION: Issue #4095 - URL-derived packages need defaulted_keys to track
+        // which fields have stub values that should be replaced with index.json values.
+        // SETUP: Parse different package types from URLs
+        // ASSERTIONS: defaulted_keys contains _initialized sentinel and appropriate stub field names
+
+        SECTION("defaulted_keys_populated_for_conda_url")
+        {
+            // PURPOSE: Verify conda packages (.conda, .tar.bz2) populate defaulted_keys
+            // MOTIVATION: Conda packages from URLs have stub values for build_number,
+            // license, timestamp, track_features, depends, constrains that must be replaced
+            // SETUP: Parse a conda URL
+            // ASSERTIONS: defaulted_keys contains _initialized + stub field names
+
+            static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/test-pkg-1.0-h123456_0.conda";
+            auto pkg = PackageInfo::from_url(url).value();
+
+            // Verify _initialized sentinel is present as first element
+            REQUIRE_FALSE(pkg.defaulted_keys.empty());
+            REQUIRE(pkg.defaulted_keys[0] == "_initialized");
+
+            // Verify stub fields are listed
+            auto contains_key = [&pkg](const std::string& key) -> bool
+            {
+                return std::find(pkg.defaulted_keys.cbegin(), pkg.defaulted_keys.cend(), key)
+                       != pkg.defaulted_keys.cend();
+            };
+
+            REQUIRE(contains_key("build_number"));
+            REQUIRE(contains_key("license"));
+            REQUIRE(contains_key("timestamp"));
+            REQUIRE(contains_key("track_features"));
+            REQUIRE(contains_key("depends"));
+            REQUIRE(contains_key("constrains"));
+        }
+
+        SECTION("defaulted_keys_populated_for_wheel_url")
+        {
+            // PURPOSE: Verify wheel packages (.whl) populate defaulted_keys including build/build_string
+            // MOTIVATION: Wheel packages have additional stub fields (build, build_string) beyond conda
+            // SETUP: Parse a wheel URL
+            // ASSERTIONS: defaulted_keys contains _initialized + conda fields + build/build_string
+
+            static constexpr std::string_view url = "https://files.pythonhosted.org/packages/test_pkg-1.0-py3-none-any.whl";
+            auto pkg = PackageInfo::from_url(url).value();
+
+            REQUIRE_FALSE(pkg.defaulted_keys.empty());
+            REQUIRE(pkg.defaulted_keys[0] == "_initialized");
+
+            auto contains_key = [&pkg](const std::string& key) -> bool
+            {
+                return std::find(pkg.defaulted_keys.cbegin(), pkg.defaulted_keys.cend(), key)
+                       != pkg.defaulted_keys.cend();
+            };
+
+            // Wheel-specific fields
+            REQUIRE(contains_key("build"));
+            REQUIRE(contains_key("build_string"));
+            // Standard stub fields
+            REQUIRE(contains_key("build_number"));
+            REQUIRE(contains_key("license"));
+            REQUIRE(contains_key("timestamp"));
+            REQUIRE(contains_key("track_features"));
+            REQUIRE(contains_key("depends"));
+            REQUIRE(contains_key("constrains"));
+        }
+
+        SECTION("defaulted_keys_populated_for_tar_gz_url")
+        {
+            // PURPOSE: Verify tar.gz packages populate defaulted_keys (same as wheels)
+            // MOTIVATION: Tar.gz packages have same stub fields as wheels
+            // SETUP: Parse a tar.gz URL
+            // ASSERTIONS: defaulted_keys contains _initialized + wheel fields
+
+            static constexpr std::string_view url = "https://files.pythonhosted.org/packages/test-pkg-1.0.tar.gz";
+            auto pkg = PackageInfo::from_url(url).value();
+
+            REQUIRE_FALSE(pkg.defaulted_keys.empty());
+            REQUIRE(pkg.defaulted_keys[0] == "_initialized");
+
+            auto contains_key = [&pkg](const std::string& key) -> bool
+            {
+                return std::find(pkg.defaulted_keys.cbegin(), pkg.defaulted_keys.cend(), key)
+                       != pkg.defaulted_keys.cend();
+            };
+
+            REQUIRE(contains_key("build"));
+            REQUIRE(contains_key("build_string"));
+            REQUIRE(contains_key("build_number"));
+            REQUIRE(contains_key("license"));
+            REQUIRE(contains_key("timestamp"));
+            REQUIRE(contains_key("track_features"));
+            REQUIRE(contains_key("depends"));
+            REQUIRE(contains_key("constrains"));
+        }
+
+        SECTION("defaulted_keys_populated_for_git_url")
+        {
+            // PURPOSE: Verify git URLs populate defaulted_keys with extensive stub field list
+            // MOTIVATION: Git URLs provide minimal info (only package_url and optionally name),
+            // so most fields are stubs that must be replaced from index.json
+            // SETUP: Parse a git URL
+            // ASSERTIONS: defaulted_keys contains _initialized + extensive stub field list
+
+            static constexpr std::string_view url = "git+https://github.com/test/repo@v1.0#egg=test-git-pkg";
+            auto pkg = PackageInfo::from_url(url).value();
+
+            REQUIRE_FALSE(pkg.defaulted_keys.empty());
+            REQUIRE(pkg.defaulted_keys[0] == "_initialized");
+
+            auto contains_key = [&pkg](const std::string& key) -> bool
+            {
+                return std::find(pkg.defaulted_keys.cbegin(), pkg.defaulted_keys.cend(), key)
+                       != pkg.defaulted_keys.cend();
+            };
+
+            // Git URLs have many stub fields
+            REQUIRE(contains_key("version"));
+            REQUIRE(contains_key("build"));
+            REQUIRE(contains_key("build_string"));
+            REQUIRE(contains_key("build_number"));
+            REQUIRE(contains_key("channel"));
+            REQUIRE(contains_key("subdir"));
+            REQUIRE(contains_key("fn"));
+            REQUIRE(contains_key("license"));
+            REQUIRE(contains_key("timestamp"));
+            REQUIRE(contains_key("track_features"));
+            REQUIRE(contains_key("depends"));
+            REQUIRE(contains_key("constrains"));
+        }
+    }
 }
