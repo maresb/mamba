@@ -150,6 +150,40 @@ construct(Configuration& config, const fs::u8path& prefix, bool extract_conda_pk
 
             if (!repodata_record.is_null())
             {
+                // Handle metadata for URL-derived packages using the defaulted_keys mechanism.
+                // This is the same logic as in write_repodata_record() in package_fetcher.cpp.
+                //
+                // - If pkg_info has "_initialized" in defaulted_keys: URL-derived package
+                //   → Erase listed stub fields, then merge with index.json
+                // - If no "_initialized": repodata from cache, trust all fields
+                //   → No fields erased, preserve channel patches
+                //
+                // Healing: Corrupted caches from v2.1.1-v2.4.0 have stub signature
+                // (timestamp=0 AND license=""). These trigger re-extraction in
+                // has_valid_extracted_dir(), so this code path handles fresh extractions.
+                // See GitHub issue #4095.
+                auto contains_initialized = [&]()
+                {
+                    return std::find(
+                               pkg_info.defaulted_keys.begin(),
+                               pkg_info.defaulted_keys.end(),
+                               "_initialized"
+                           )
+                           != pkg_info.defaulted_keys.end();
+                };
+
+                if (contains_initialized())
+                {
+                    // URL-derived package: erase stub fields before merging with index.json
+                    for (const auto& key : pkg_info.defaulted_keys)
+                    {
+                        if (key != "_initialized")
+                        {
+                            repodata_record.erase(key);
+                        }
+                    }
+                }
+
                 // update values from index if there are any that are not part of the
                 // repodata_record.json yet
                 repodata_record.insert(index.cbegin(), index.cend());
