@@ -1,0 +1,30 @@
+From cd13d63dcf96e3084f2a9f97e747c2a55a04e144 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Tue, 25 Nov 2025 23:08:29 +0000
+Subject: [PATCH 09/11] feat: Conditionally include track_features in
+ package_info
+
+Co-authored-by: bernard.mares <bernard.mares@pymc-labs.com>
+---
+ libmamba/src/specs/package_info.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/libmamba/src/specs/package_info.cpp b/libmamba/src/specs/package_info.cpp
+index 0b0c9e24..136c2874 100644
+--- a/libmamba/src/specs/package_info.cpp
++++ b/libmamba/src/specs/package_info.cpp
+@@ -507,7 +507,11 @@ namespace mamba::specs
+             j["noarch"] = pkg.noarch;
+         }
+         j["license"] = pkg.license;
+-        j["track_features"] = fmt::format("{}", fmt::join(pkg.track_features, ","));  // Conda fmt
++        // Only include track_features if non-empty (matches conda behavior)
++        if (!pkg.track_features.empty())
++        {
++            j["track_features"] = fmt::format("{}", fmt::join(pkg.track_features, ","));
++        }
+         if (!pkg.md5.empty())
+         {
+             j["md5"] = pkg.md5;
+--
+2.50.1

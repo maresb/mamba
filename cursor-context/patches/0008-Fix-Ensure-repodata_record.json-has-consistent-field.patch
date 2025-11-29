@@ -1,0 +1,387 @@
+From c5ac53f5c1a15490a49146205b46d37092fbf12d Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Tue, 25 Nov 2025 22:43:54 +0000
+Subject: [PATCH 08/11] Fix: Ensure repodata_record.json has consistent fields
+
+Co-authored-by: bernard.mares <bernard.mares@pymc-labs.com>
+---
+ libmamba/src/core/package_fetcher.cpp         |  35 +++
+ .../tests/src/core/test_package_fetcher.cpp   | 272 ++++++++++++++++++
+ micromamba/src/constructor.cpp                |  35 +++
+ 3 files changed, 342 insertions(+)
+
+diff --git a/libmamba/src/core/package_fetcher.cpp b/libmamba/src/core/package_fetcher.cpp
+index fc958e66..aa0c6586 100644
+--- a/libmamba/src/core/package_fetcher.cpp
++++ b/libmamba/src/core/package_fetcher.cpp
+@@ -478,6 +478,41 @@ namespace mamba
+         // while keeping the existing fields from the repodata record.
+         repodata_record.insert(index.cbegin(), index.cend());
+
++        // Ensure depends and constrains are always present as arrays.
++        // Example: nlohmann_json-abi is missing depends in index.json, but conda adds it to
++        // repodata_record.json as an empty list.
++        if (!repodata_record.contains("depends"))
++        {
++            repodata_record["depends"] = nlohmann::json::array();
++        }
++        if (!repodata_record.contains("constrains"))
++        {
++            repodata_record["constrains"] = nlohmann::json::array();
++        }
++
++        // track_features should only be included if non-empty.
++        // Example: markupsafe and pyyaml have non-empty track_features.
++        if (repodata_record.contains("track_features"))
++        {
++            auto& tf = repodata_record["track_features"];
++            bool is_empty = (tf.is_string() && tf.get<std::string>().empty())
++                            || (tf.is_array() && tf.empty());
++            if (is_empty)
++            {
++                repodata_record.erase("track_features");
++            }
++        }
++
++        // Omit arch and platform when null.
++        if (repodata_record.contains("arch") && repodata_record["arch"].is_null())
++        {
++            repodata_record.erase("arch");
++        }
++        if (repodata_record.contains("platform") && repodata_record["platform"].is_null())
++        {
++            repodata_record.erase("platform");
++        }
++
+         if (repodata_record.find("size") == repodata_record.end() || repodata_record["size"] == 0)
+         {
+             repodata_record["size"] = fs::file_size(m_tarball_path);
+diff --git a/libmamba/tests/src/core/test_package_fetcher.cpp b/libmamba/tests/src/core/test_package_fetcher.cpp
+index 2afd703f..133c167d 100644
+--- a/libmamba/tests/src/core/test_package_fetcher.cpp
++++ b/libmamba/tests/src/core/test_package_fetcher.cpp
+@@ -599,4 +599,276 @@ namespace
+         CHECK(healed_repodata["timestamp"] == 1234567890);
+         CHECK(healed_repodata["build_number"] == 42);
+     }
++
++    TEST_CASE("PackageFetcher::write_repodata_record depends/constrains always present")
++    {
++        // Test that depends and constrains are always included in repodata_record.json
++        // even when absent from index.json (like nlohmann_json-abi package)
++
++        auto& ctx = mambatests::context();
++        TemporaryDirectory temp_dir;
++        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
++
++        static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/empty-deps-1.0-h0_0.conda";
++        auto pkg_info = specs::PackageInfo::from_url(url).value();
++
++        const std::string pkg_basename = "empty-deps-1.0-h0_0";
++
++        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
++        auto info_dir = pkg_extract_dir / "info";
++        fs::create_directories(info_dir);
++
++        // Create index.json WITHOUT depends or constrains (like nlohmann_json-abi)
++        nlohmann::json index_json;
++        index_json["name"] = "empty-deps";
++        index_json["version"] = "1.0";
++        index_json["build"] = "h0_0";
++
++        {
++            std::ofstream index_file((info_dir / "index.json").std_path());
++            index_file << index_json.dump(2);
++        }
++
++        {
++            std::ofstream paths_file((info_dir / "paths.json").std_path());
++            paths_file << R"({"paths": [], "paths_version": 1})";
++        }
++
++        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
++        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
++        REQUIRE(fs::exists(tarball_path));
++
++        auto modified_pkg_info = pkg_info;
++        modified_pkg_info.filename = pkg_basename + ".tar.bz2";
++
++        fs::remove_all(pkg_extract_dir);
++
++        PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
++
++        ExtractOptions options;
++        options.sparse = false;
++        options.subproc_mode = extract_subproc_mode::mamba_package;
++
++        bool extract_success = pkg_fetcher.extract(options);
++        REQUIRE(extract_success);
++
++        auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
++        REQUIRE(fs::exists(repodata_record_path));
++
++        std::ifstream repodata_file(repodata_record_path.std_path());
++        nlohmann::json repodata_record;
++        repodata_file >> repodata_record;
++
++        // Verify that depends and constrains are present as empty arrays
++        REQUIRE(repodata_record.contains("depends"));
++        CHECK(repodata_record["depends"].is_array());
++        CHECK(repodata_record["depends"].empty());
++
++        REQUIRE(repodata_record.contains("constrains"));
++        CHECK(repodata_record["constrains"].is_array());
++        CHECK(repodata_record["constrains"].empty());
++    }
++
++    TEST_CASE("PackageFetcher::write_repodata_record track_features handling")
++    {
++        // Test that track_features is:
++        // - Omitted when empty
++        // - Included when non-empty (like markupsafe and pyyaml packages)
++
++        auto& ctx = mambatests::context();
++        TemporaryDirectory temp_dir;
++        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
++
++        SECTION("Empty track_features is omitted")
++        {
++            static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/no-tf-1.0-h0_0.conda";
++            auto pkg_info = specs::PackageInfo::from_url(url).value();
++
++            const std::string pkg_basename = "no-tf-1.0-h0_0";
++
++            auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
++            auto info_dir = pkg_extract_dir / "info";
++            fs::create_directories(info_dir);
++
++            nlohmann::json index_json;
++            index_json["name"] = "no-tf";
++            index_json["version"] = "1.0";
++            index_json["build"] = "h0_0";
++            // No track_features key
++
++            {
++                std::ofstream index_file((info_dir / "index.json").std_path());
++                index_file << index_json.dump(2);
++            }
++
++            {
++                std::ofstream paths_file((info_dir / "paths.json").std_path());
++                paths_file << R"({"paths": [], "paths_version": 1})";
++            }
++
++            auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
++            create_archive(
++                pkg_extract_dir,
++                tarball_path,
++                compression_algorithm::bzip2,
++                1,
++                1,
++                nullptr
++            );
++            REQUIRE(fs::exists(tarball_path));
++
++            auto modified_pkg_info = pkg_info;
++            modified_pkg_info.filename = pkg_basename + ".tar.bz2";
++
++            fs::remove_all(pkg_extract_dir);
++
++            PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
++
++            ExtractOptions options;
++            options.sparse = false;
++            options.subproc_mode = extract_subproc_mode::mamba_package;
++
++            bool extract_success = pkg_fetcher.extract(options);
++            REQUIRE(extract_success);
++
++            auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
++            REQUIRE(fs::exists(repodata_record_path));
++
++            std::ifstream repodata_file(repodata_record_path.std_path());
++            nlohmann::json repodata_record;
++            repodata_file >> repodata_record;
++
++            // track_features should be omitted when empty
++            CHECK_FALSE(repodata_record.contains("track_features"));
++        }
++
++        SECTION("Non-empty track_features is preserved")
++        {
++            static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/with-tf-1.0-h0_0.conda";
++            auto pkg_info = specs::PackageInfo::from_url(url).value();
++
++            const std::string pkg_basename = "with-tf-1.0-h0_0";
++
++            auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
++            auto info_dir = pkg_extract_dir / "info";
++            fs::create_directories(info_dir);
++
++            nlohmann::json index_json;
++            index_json["name"] = "with-tf";
++            index_json["version"] = "1.0";
++            index_json["build"] = "h0_0";
++            index_json["track_features"] = "cython";  // Non-empty track_features
++
++            {
++                std::ofstream index_file((info_dir / "index.json").std_path());
++                index_file << index_json.dump(2);
++            }
++
++            {
++                std::ofstream paths_file((info_dir / "paths.json").std_path());
++                paths_file << R"({"paths": [], "paths_version": 1})";
++            }
++
++            auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
++            create_archive(
++                pkg_extract_dir,
++                tarball_path,
++                compression_algorithm::bzip2,
++                1,
++                1,
++                nullptr
++            );
++            REQUIRE(fs::exists(tarball_path));
++
++            auto modified_pkg_info = pkg_info;
++            modified_pkg_info.filename = pkg_basename + ".tar.bz2";
++
++            fs::remove_all(pkg_extract_dir);
++
++            PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
++
++            ExtractOptions options;
++            options.sparse = false;
++            options.subproc_mode = extract_subproc_mode::mamba_package;
++
++            bool extract_success = pkg_fetcher.extract(options);
++            REQUIRE(extract_success);
++
++            auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
++            REQUIRE(fs::exists(repodata_record_path));
++
++            std::ifstream repodata_file(repodata_record_path.std_path());
++            nlohmann::json repodata_record;
++            repodata_file >> repodata_record;
++
++            // track_features should be present when non-empty
++            REQUIRE(repodata_record.contains("track_features"));
++            CHECK(repodata_record["track_features"] == "cython");
++        }
++    }
++
++    TEST_CASE("PackageFetcher::write_repodata_record null arch/platform handling")
++    {
++        // Test that arch and platform are omitted when null
++
++        auto& ctx = mambatests::context();
++        TemporaryDirectory temp_dir;
++        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
++
++        static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/noarch/noarch-pkg-1.0-py_0.conda";
++        auto pkg_info = specs::PackageInfo::from_url(url).value();
++
++        const std::string pkg_basename = "noarch-pkg-1.0-py_0";
++
++        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
++        auto info_dir = pkg_extract_dir / "info";
++        fs::create_directories(info_dir);
++
++        // Create index.json with null arch and platform (common for noarch packages)
++        nlohmann::json index_json;
++        index_json["name"] = "noarch-pkg";
++        index_json["version"] = "1.0";
++        index_json["build"] = "py_0";
++        index_json["arch"] = nullptr;      // null
++        index_json["platform"] = nullptr;  // null
++
++        {
++            std::ofstream index_file((info_dir / "index.json").std_path());
++            index_file << index_json.dump(2);
++        }
++
++        {
++            std::ofstream paths_file((info_dir / "paths.json").std_path());
++            paths_file << R"({"paths": [], "paths_version": 1})";
++        }
++
++        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
++        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
++        REQUIRE(fs::exists(tarball_path));
++
++        auto modified_pkg_info = pkg_info;
++        modified_pkg_info.filename = pkg_basename + ".tar.bz2";
++
++        fs::remove_all(pkg_extract_dir);
++
++        PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
++
++        ExtractOptions options;
++        options.sparse = false;
++        options.subproc_mode = extract_subproc_mode::mamba_package;
++
++        bool extract_success = pkg_fetcher.extract(options);
++        REQUIRE(extract_success);
++
++        auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
++        REQUIRE(fs::exists(repodata_record_path));
++
++        std::ifstream repodata_file(repodata_record_path.std_path());
++        nlohmann::json repodata_record;
++        repodata_file >> repodata_record;
++
++        // Verify that null arch and platform are omitted
++        CHECK_FALSE(repodata_record.contains("arch"));
++        CHECK_FALSE(repodata_record.contains("platform"));
++    }
+ }
+diff --git a/micromamba/src/constructor.cpp b/micromamba/src/constructor.cpp
+index bd40d269..021cdb68 100644
+--- a/micromamba/src/constructor.cpp
++++ b/micromamba/src/constructor.cpp
+@@ -209,6 +209,41 @@ construct(Configuration& config, const fs::u8path& prefix, bool extract_conda_pk
+             repodata_record["url"] = pkg_info.package_url;
+             repodata_record["channel"] = pkg_info.channel;
+
++            // Ensure depends and constrains are always present as arrays.
++            // Example: nlohmann_json-abi is missing depends in index.json, but conda adds it to
++            // repodata_record.json as an empty list.
++            if (!repodata_record.contains("depends"))
++            {
++                repodata_record["depends"] = nlohmann::json::array();
++            }
++            if (!repodata_record.contains("constrains"))
++            {
++                repodata_record["constrains"] = nlohmann::json::array();
++            }
++
++            // track_features should only be included if non-empty.
++            // Example: markupsafe and pyyaml have non-empty track_features.
++            if (repodata_record.contains("track_features"))
++            {
++                auto& tf = repodata_record["track_features"];
++                bool is_empty = (tf.is_string() && tf.get<std::string>().empty())
++                                || (tf.is_array() && tf.empty());
++                if (is_empty)
++                {
++                    repodata_record.erase("track_features");
++                }
++            }
++
++            // Omit arch and platform when null.
++            if (repodata_record.contains("arch") && repodata_record["arch"].is_null())
++            {
++                repodata_record.erase("arch");
++            }
++            if (repodata_record.contains("platform") && repodata_record["platform"].is_null())
++            {
++                repodata_record.erase("platform");
++            }
++
+             if (repodata_record.find("size") == repodata_record.end() || repodata_record["size"] == 0)
+             {
+                 repodata_record["size"] = fs::file_size(entry);
+--
+2.50.1

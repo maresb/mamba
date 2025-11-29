@@ -1,0 +1,172 @@
+From 400f50d266af103550bfd4bb48e380e48361bce9 Mon Sep 17 00:00:00 2001
+From: Ben Mares <services-git-throwaway2@tensorial.com>
+Date: Tue, 25 Nov 2025 23:32:19 +0100
+Subject: [PATCH 07/11] DELETE ME: pre-plan.md
+
+---
+ cursor-context/pre-plan.md | 154 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 154 insertions(+)
+ create mode 100644 cursor-context/pre-plan.md
+
+diff --git a/cursor-context/pre-plan.md b/cursor-context/pre-plan.md
+new file mode 100644
+index 00000000..10a87a45
+--- /dev/null
++++ b/cursor-context/pre-plan.md
+@@ -0,0 +1,154 @@
++# Pre-plan: Fix Incorrect repodata_record.json Metadata
++
++<!-- markdownlint-disable MD013 -->
++
++## Requirements
++
++- Fix the cache corruption issue where URL-derived packages have incorrect metadata in `repodata_record.json` (<https://github.com/mamba-org/mamba/issues/4095>).
++- Ensure that when extracting packages from URLs (explicit installs), all metadata fields (license, timestamp, build_number, track_features, depends, constrains) come from the package's actual `index.json` and are not overwritten by stub/default values.
++- Preserve channel repodata patches that intentionally set dependencies or constraints to empty arrays.
++- Provide automatic healing for corrupted cache entries from previous buggy versions (v2.1.1-v2.3.2) that wrote stub values.
++- Follow TDD approach with explicit fail-first verification:
++  - Write tests that fail initially (demonstrating the problem).
++  - **Execute and verify tests fail as expected** before implementing any fix.
++  - Implement the fix.
++  - **Execute and verify tests pass** after implementation.
++  - Follow repository's dev environment instructions (`docs/source/developer_zone/dev_environment.rst`) for setting up the environment and running tests.
++- Prepare a maintainer-ready PR with comprehensive context:
++  - Document the historical context of the `defaulted_keys` field (introduced in PR #1120, fell out of use in 2023 during libsolv wrapper refactor).
++  - Include findings about how the current code fails to preserve patched repodata.
++  - Provide sufficient detail for non-maintainers to understand the problem and solution.
++- When creating the plan from this pre-plan, verify all Research findings for correctness and completeness, and surface any significant issues to the user.
++
++## Research
++
++- Q: Where are the repository's instructions for setting up the development environment?
++  - A: `docs/source/developer_zone/dev_environment.rst` contains comprehensive instructions:
++    - Setup: Create dev environment with `micromamba create -n mamba -c conda-forge -f dev/environment-dev.yml`
++    - Build: Configure with `cmake -B build/ -G Ninja --preset mamba-unix-shared-debug-dev`, then build with `cmake --build build/ --parallel`
++    - C++ tests: Run with `./build/libmamba/tests/test_libmamba`
++    - Python integration tests: Set `TEST_MAMBA_EXE` and run `python -m pytest micromamba/tests`
++    - Code formatting: Install pre-commit hooks with `pre-commit install`
++
++- Q: What is the root cause of the incorrect repodata_record.json metadata?
++  - A: The issue occurs in `PackageFetcher::write_repodata_record()` at `libmamba/src/core/package_fetcher.cpp:431-467`. When packages are installed from URLs (explicit installs), `PackageInfo::from_url()` creates a "stub" object with only basic info extracted from the URL (name, version, build_string, channel, filename). Default/stub values are used for other fields: `build_number=0`, `license=""`, `timestamp=0`, `track_features=[]`, `dependencies=[]`, `constrains=[]`. The current code (v2.3.3) converts this stub PackageInfo to JSON, then uses `repodata_record.insert(index.cbegin(), index.cend())` to merge with `index.json`. However, `insert()` only adds missing keys—it doesn't overwrite existing keys. Since the stub already has these keys (with wrong values), the correct values from `index.json` are ignored.
++
++- Q: Where is `PackageInfo::from_url()` implemented and what fields does it populate?
++  - A: Implemented in `libmamba/src/specs/package_info.cpp:193-258`, specifically in the helper function `parse_url()` at lines 40-178. For conda packages (`.tar.bz2` or `.conda`):
++    - **Populated from URL**: `name`, `version`, `build_string`, `channel`, `package_url`, `platform`, `filename`, `package_type`
++    - **Optional from URL hash**: `md5`, `sha256` (only if hash suffix present)
++    - **Default/stub values** (NOT populated): `build_number=0`, `license=""`, `timestamp=0`, `track_features=[]`, `dependencies=[]`, `constrains=[]`, `defaulted_keys=[]`
++  - For wheel packages (`.whl`) and source distributions (`.tar.gz`), `build` and `build_string` are also NOT populated.
++  - For git URLs (`git+https`), only `package_url` and optionally `name` (from `#egg=` marker) are populated.
++
++- Q: What is the `defaulted_keys` field and what is its history?
++  - A: `defaulted_keys` is a `std::vector<std::string>` field in `PackageInfo` (declared at `libmamba/include/mamba/specs/package_info.hpp:57`).
++    - **Origin**: Introduced in PR #1120 (commit 51072d82, September 2021) by @adriendelsalle for signature verification. Originally used by `make_package_info()` when creating PackageInfo from libsolv solvables to track which fields were absent in repodata (using `solvable_lookup_deparray()`'s boolean return value).
++    - **Purpose**: Distinguish "field missing, using default" from "field intentionally set to empty".
++    - **Current usage**: Only read in `json_signable()` method (`libmamba/src/specs/package_info.cpp:306-312`) to decide whether to include empty `depends` array in signable JSON.
++    - **Why it fell out of use**: In May 2023 (commit 15f6b6e6), libsolv wrappers were introduced. The wrapper method `ObjSolvableViewConst::dependencies()` returns `ObjQueue` but discards the boolean return value from `solvable_lookup_deparray()`, making it impossible to detect field presence vs. absence. Since then, `defaulted_keys` is never populated anywhere in the codebase.
++    - **Warning comment** (line 55-56): "Be aware that `defaulted_keys` value, if set later, is not passed when going through `make_package_info` from libsolv." This is intentional—solver-derived packages come from authoritative channel repodata (potentially patched), so their fields should be trusted.
++
++- Q: How does `make_package_info()` create PackageInfo from libsolv?
++  - A: Implemented in `libmamba/src/solver/libsolv/helpers.cpp:107-150`. This function creates PackageInfo from libsolv's internal solvable representation. It populates all regular fields (name, version, dependencies, etc.) by calling wrapper methods on the solvable, but never touches `defaulted_keys`—it stays empty. This means solver-derived PackageInfo objects always have empty `defaulted_keys`, which is correct because they come from channel repodata (potentially patched) and all their fields should be authoritative.
++
++- Q: How does the current v2.3.3 fix fail to solve the problem completely?
++  - A: The v2.3.3 code at `libmamba/src/core/package_fetcher.cpp:444-453` only removes empty `depends` and `constrains` arrays unconditionally before merging with `index.json`. This approach:
++    - **Doesn't fix**: `license`, `timestamp`, `track_features`, `build_number`—these stub values remain in `repodata_record.json`
++    - **Breaks channel patches**: If channel repodata patches intentionally set `depends: []` or `constrains: []` to fix a broken package, these empty arrays are erased and then re-populated from `index.json`, silently undoing the patch
++
++- Q: Why do channel patches with intentionally empty dependencies get lost?
++  - A: When a package comes from the solver (with patched repodata that sets `depends: []`):
++    1. Line 440: `nlohmann::json repodata_record = m_package_info;` creates JSON with `"depends": []`
++    2. Lines 444-448: Detects `depends` is empty and **erases it**
++    3. Line 458: `repodata_record.insert(index.cbegin(), index.cend())` only adds missing keys, so now adds `"depends": ["foo", "bar"]` from original `index.json`
++    4. Result: The patch is silently undone and broken dependencies are restored
++  - This is explicitly mentioned in issue #4095: "Channel repodata patches that intentionally set depends/constrains to the empty list cannot be represented in the local repodata_record.json"
++
++- Q: What happens in `constructor.cpp` with repodata_record.json?
++  - A: Located at `micromamba/src/constructor.cpp:107-185`. When extracting packages during micromamba constructor initialization:
++    1. If repodata cache JSON is found (lines 134-155), it's used as the base and `insert(index)` is called to add any missing keys. Since `insert()` doesn't overwrite existing keys, patched empty `depends` arrays are preserved.
++    2. If repodata not found (lines 157-161), uses `index.json` as base and adds URL-derived fields (`fn`, `url`, `channel`, `size`, `md5`, `sha256`).
++    3. The code doesn't suffer from URL-derived stub pollution because it only overrides specific fields (`fn`, `url`, `channel`, `size`, `md5`, `sha256`) at lines 173-180, not the problematic defaulted fields.
++    4. However, when repodata cache is unavailable offline, patches cannot be applied—this is unavoidable without the cache.
++
++- Q: Which PackageInfo fields are always written by `to_json()` even when empty?
++  - A: According to `libmamba/src/specs/package_info.cpp`, the `to_json()` function (used implicitly when converting PackageInfo to JSON):
++    - **Always written** (even if empty/zero): `build_number`, `license`, `timestamp`, `track_features` (as empty string if vector is empty), `depends` (as empty array if vector is empty), `constrains` (as empty array if vector is empty)
++    - **Conditionally written** (only if present/non-default): `md5`, `sha256`, `signatures`, `python_site_packages_path`, `noarch` (only if not `NoArchType::No`)
++    - **Always written and trusted from URL parsing**: `name`, `version`, `build`/`build_string` (for conda), `channel`, `url`, `subdir`, `fn`
++    - **Special handling**: `size` (filled if missing or 0)
++
++- Q: Are there existing tests for PackageInfo and PackageFetcher?
++  - A: Yes:
++    - `libmamba/tests/src/specs/test_package_info.cpp`: Tests for PackageInfo including `from_url()` parsing
++    - `libmamba/tests/src/core/test_package_fetcher.cpp`: Tests for PackageFetcher including a test at lines 136-185 that creates a package, extracts it, and verifies `repodata_record.json` creation
++    - `libmambapy/tests/test_specs.py`: Python bindings tests including `test_PackageInfo()` at line 758
++
++- Q: What are the different code paths that create PackageInfo objects?
++  - A: Three main paths:
++    1. **URL-derived** (from `PackageInfo::from_url()`): Creates stub with limited fields, used for explicit installs from URLs
++    2. **Solver-derived** (from `make_package_info()`): Creates from libsolv solvables, contains complete metadata from channel repodata (potentially patched)
++    3. **JSON deserialization** (from `from_json()`): Reads from JSON files like cached `repodata_record.json`
++
++- Q: What testing strategy should be used to verify the fix?
++  - A: Based on the conversation and issue #4095:
++    1. **URL-derived package with stub defaults**: Create PackageInfo from URL, verify that `repodata_record.json` gets correct metadata from `index.json` (not stub values)
++    2. **Channel patch with intentionally empty dependencies**: Create PackageInfo with `depends=[]` (simulating patched repodata), verify that `repodata_record.json` preserves the empty array and doesn't restore from `index.json`
++    3. **Corrupted cache healing**: Create PackageInfo with `timestamp=0` and empty `defaulted_keys` (simulating corrupted cache from v2.1.1-v2.3.2), verify that corrupted fields are healed from `index.json`
++    4. **All problematic fields**: Test all fields that can be corrupted: `license`, `timestamp`, `build_number`, `track_features`, `depends`, `constrains`
++
++- Q: How should tests be executed and verified?
++  - A: According to `docs/source/developer_zone/dev_environment.rst`:
++    1. Set up dev environment: `micromamba create -n mamba -c conda-forge -f dev/environment-dev.yml && micromamba activate mamba`
++    2. Build: `cmake -B build/ -G Ninja --preset mamba-unix-shared-debug-dev && cmake --build build/ --parallel`
++    3. Run C++ tests: `./build/libmamba/tests/test_libmamba`
++    4. Verify tests fail before fix (demonstrating the bug)
++    5. Implement fix
++    6. Verify tests pass after fix
++
++## Decisions
++
++- **Use `defaulted_keys` mechanism to track stub fields**: Rather than adding a new provenance enum or using heuristics, leverage the existing `defaulted_keys` vector in PackageInfo. This infrastructure was designed for exactly this purpose and is currently unused. When `from_url()` creates a stub PackageInfo, populate `defaulted_keys` with the names of fields that have default/stub values. When writing `repodata_record.json`, erase all keys in `defaulted_keys` from the initial JSON before merging with `index.json`.
++  - **Alternatives considered**: (a) Add provenance enum to track URL-derived vs. solver-derived PackageInfo; (b) Use heuristics like `timestamp==0 && build_number==0 && license.empty()` to detect stubs; (c) Use `std::optional` for all fields (major refactor)
++  - **Why chosen**: The `defaulted_keys` infrastructure already exists, requires no ABI changes, provides field-level granularity (more precise than provenance enum), and naturally works with solver-derived PackageInfo (which has empty `defaulted_keys` and should be fully trusted including intentionally-empty arrays from patches)
++
++- **Fix both `PackageFetcher::write_repodata_record()` and `constructor.cpp`**: Apply the fix in both locations where `repodata_record.json` is written for consistency and completeness.
++  - **Alternatives considered**: Focus only on PackageFetcher since it's the main code path
++  - **Why chosen**: Ensures consistency across the codebase, prevents similar bugs in constructor path, provides comprehensive solution
++
++- **Populate `defaulted_keys` based on package type**:
++  - **Conda packages** (`.tar.bz2`, `.conda`): Add to `defaulted_keys`: `["build_number", "license", "timestamp", "track_features", "depends", "constrains"]`
++  - **Wheel packages** (`.whl`): Add additionally: `"build"`, `"build_string"` (these are not set by `parse_url()` for wheels)
++  - **Source distributions** (`.tar.gz`): Same as wheels
++  - **Git URLs** (`git+https`): Nearly all fields are defaulted since only `package_url` and optionally `name` are set
++  - **Exclude from `defaulted_keys`**: `noarch`, `python_site_packages_path` (these are omitted by `to_json()` when unset, allowing index.json to fill them); `size` (has special-case logic); `md5`/`sha256` (only set when hash present in URL)
++  - **Why these fields**: Based on audit of `parse_url()` to identify which fields are set vs. defaulted, and `to_json()` to identify which fields are always written even when empty
++
++- **Implement cache healing for corrupted entries**: In `write_repodata_record()`, detect corrupted cache entries from buggy versions (v2.1.1-v2.3.2) by checking `timestamp==0 && defaulted_keys.empty()`. If detected, treat as corrupted and populate `defaulted_keys` with stub fields to trigger healing from `index.json`.
++  - **Alternatives considered**: (a) Heal in `from_json()` when reading cache (risky—can't distinguish cache from channel repodata); (b) Heal in multiple cache read locations for wider coverage (more invasive)
++  - **Why chosen**: Healing in `write_repodata_record()` is safe (only runs during package extraction), simple (localized fix), and provides automatic healing during natural cache churn without requiring manual intervention or wide-reaching changes
++
++- **Use timestamp=0 as corruption signature**: Since real packages virtually always have build timestamps, `timestamp=0` is a reliable indicator of URL-derived stub values that were written by buggy versions.
++  - **Why chosen**: Provides clear, reliable detection of corrupted cache without false positives
++
++- **Do NOT restore `defaulted_keys` population in `make_package_info()`**: Keep `make_package_info()` unchanged—it should continue to produce PackageInfo with empty `defaulted_keys`.
++  - **Why**: Restoring the original behavior would require upstream changes to libsolv wrappers to expose field presence information. More importantly, empty `defaulted_keys` for solver-derived packages is actually the correct behavior—it signals "trust all fields, including intentionally-empty arrays from patches"
++
++- **Follow TDD approach**: Write failing tests first to demonstrate the problem, verify they fail as expected, implement the fix, then verify tests pass.
++  - **Why chosen**: Ensures tests actually catch the bug, prevents false positives, demonstrates the problem clearly for reviewers, provides regression protection
++
++## Notes
++
++- It is essential that the plan reflects the principles of TDD and atomic commits.
++- In order to make it possible to review the code, each commit must be minimal so that the context required to review it is minimal.
++- The plan MUST include a breakdown of all the code into these atomic commits.
++- The plan MUST include the installation and use of pre-commit to ensure that all commits follow the linting practices.
++- The plan MUST follow a red to green TDD strategy.
++- For each red and each green, the plan MUST verify the expected states of all added tests by actually executing them.
++- The plan MUST set up a dev environment for running tests, even if it takes extra time.
++- The plan MUST NOT declare tests red or green until verified by test execution.
++- In case tests cannot be executed for any reason, the plan MUST explicitly account for aborting the plan and notifying the user.
++- When a commit fixes a test, the plan's commit extended description MUST indicate which tests were fixed.
++- In case the development environment instructions recommend `micromamba activate`, you should instead use `micromamba run -n environment_name command` to run commands in the environment.
++- In each step of the plan that involves writing code, you MUST include executing the tests, and failing hard on the step if the tests either don't execute or produce unexpected results and cannot be fixed.
+--
+2.50.1

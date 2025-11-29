@@ -1,0 +1,78 @@
+From be8a09694f3f3fbacfa5441dd6a3a4cad858c1c7 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Sun, 9 Nov 2025 18:10:12 +0000
+Subject: [PATCH 06/11] fix: apply healing and prevention logic to
+ constructor.cpp (GREEN)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Apply the same defaulted_keys logic to constructor.cpp that creates offline
+installers, ensuring both code paths that write repodata_record.json use
+identical handling.
+
+This ensures constructor environments have the same:
+- Healing: Detect corrupted caches (timestamp=0 AND license="")
+- Prevention: Use defaulted_keys to erase stub values
+- Preservation: Keep channel patches with intentionally empty arrays
+
+Maintains consistency across the codebase for repodata_record.json generation
+in both normal package installation and offline installer creation.
+
+Test Status: Constructor test now PASSES ✓
+- BEFORE (RED): license='', timestamp=0, build_number=0 (stub values from cache)
+- AFTER (GREEN): license='MIT', timestamp=1234567890, build_number=42 (from index.json)
+
+Related to GitHub issue #4095
+---
+ micromamba/src/constructor.cpp | 35 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/micromamba/src/constructor.cpp b/micromamba/src/constructor.cpp
+index a7bc4aca..bd40d269 100644
+--- a/micromamba/src/constructor.cpp
++++ b/micromamba/src/constructor.cpp
+@@ -150,6 +150,41 @@ construct(Configuration& config, const fs::u8path& prefix, bool extract_conda_pk
+
+             if (!repodata_record.is_null())
+             {
++                // Handle metadata for new extractions (both current and healing from
++                // v2.1.1-v2.3.3).
++                //
++                // Metadata handling logic:
++                // - URL-derived packages (current): defaulted_keys populated by from_url()
++                //   → Erase those keys, allowing index.json to provide correct values
++                //
++                // - Packages with stub signature (from v2.1.1-v2.3.3): defaulted_keys empty but
++                //   has timestamp==0 AND license=="" (the stub signature)
++                //   → Treat stub fields as defaulted, allowing index.json to replace them
++                //   → This handles both NEW extractions AND re-extractions during healing
++                //
++                // - Channel packages: defaulted_keys empty + real metadata (no stub signature)
++                //   → No fields erased, values from solver/repodata preserved correctly
++                //
++                // NOTE: Corrupted caches from v2.1.1-v2.3.3 are automatically healed by
++                // has_valid_extracted_dir() detecting corruption and invalidating the cache,
++                // triggering re-extraction. See issue #4095.
++                auto defaulted_keys = pkg_info.defaulted_keys;
++                if (defaulted_keys.empty() && repodata_record.contains("timestamp")
++                    && repodata_record["timestamp"] == 0 && repodata_record.contains("license")
++                    && repodata_record["license"] == "")
++                {
++                    // Stub signature detected - mark stub fields as defaulted
++                    defaulted_keys = { "build_number",   "license", "timestamp",
++                                       "track_features", "depends", "constrains" };
++                }
++
++                // Erase fields that were defaulted or have stub values
++                // This allows index.json to provide the correct values
++                for (const auto& key : defaulted_keys)
++                {
++                    repodata_record.erase(key);
++                }
++
+                 // update values from index if there are any that are not part of the
+                 // repodata_record.json yet
+                 repodata_record.insert(index.cbegin(), index.cend());
+--
+2.50.1
