@@ -359,6 +359,22 @@ namespace mamba
                             }
                         }
                     }
+
+                    // HEALING: Detect corrupted cache from buggy versions (v2.1.1-v2.4.0).
+                    // These versions wrote stub values (timestamp=0, license="") to
+                    // repodata_record.json for URL-derived packages. By returning valid=false
+                    // here, we trigger re-extraction, and write_repodata_record() will write
+                    // correct values using index.json.
+                    // See GitHub issue #4095 for details.
+                    if (valid && repodata_record.contains("timestamp")
+                        && repodata_record["timestamp"] == 0 && repodata_record.contains("license")
+                        && repodata_record["license"] == "")
+                    {
+                        LOG_INFO << "Detected corrupted metadata in cache (v2.1.1-v2.4.0 bug, "
+                                    "issue #4095), will re-extract: "
+                                 << extracted_dir.string();
+                        valid = false;
+                    }
                 }
                 catch (const nlohmann::json::exception& e)
                 {
