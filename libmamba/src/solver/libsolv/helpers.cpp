@@ -146,6 +146,12 @@ namespace mamba::solver::libsolv
             std::transform(feats.begin(), feats.end(), std::back_inserter(out.track_features), id_to_str);
         }
 
+        // Solver packages have authoritative metadata from channel repodata (potentially patched).
+        // We set only _initialized to signal 'trust all fields' without attempting to detect
+        // absent fields, which would require libsolv wrapper changes. See issue #4095.
+        // Sentinel for fail-hard verification; can be removed later if desired.
+        out.defaulted_keys = { "_initialized" };
+
         return out;
     }
 
