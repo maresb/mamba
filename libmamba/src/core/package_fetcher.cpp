@@ -492,6 +492,44 @@ namespace mamba
             }
         }
 
+        // Handle solver-derived packages with stub metadata.
+        //
+        // When URL specs go through the solver (without --explicit), the PackageInfo
+        // is created via make_package_info() which sets defaulted_keys={"_initialized"}.
+        // However, the solver's solvable may have stub values (timestamp=0, license="")
+        // from partial repodata. These stub values would be written to repodata_record.json
+        // and then detected as "corrupted" by the healing code, causing infinite loops.
+        //
+        // Solution: Detect this stub signature and erase those fields so index.json
+        // can provide correct values. This is safe because:
+        // 1. Real packages virtually always have timestamps (build tools set them)
+        // 2. Real packages typically have license information
+        // 3. The combination timestamp=0 AND license="" is extremely rare legitimately
+        // 4. Even in false positive cases, index.json provides correct values
+        //
+        // See GitHub issue #4095.
+        bool has_stub_timestamp = repodata_record.contains("timestamp")
+                                  && repodata_record["timestamp"].is_number()
+                                  && repodata_record["timestamp"] == 0;
+        bool has_stub_license = repodata_record.contains("license")
+                                && repodata_record["license"].is_string()
+                                && repodata_record["license"].get<std::string>().empty();
+        if (has_stub_timestamp && has_stub_license)
+        {
+            LOG_DEBUG << "Detected stub metadata in solver-derived package, "
+                      << "will use values from index.json (issue #4095)";
+            // Erase stub fields so index.json values are used
+            repodata_record.erase("timestamp");
+            repodata_record.erase("license");
+            // Also erase other potentially stub fields that aren't reliably detected
+            // Build_number=0 could be legitimate, but when combined with timestamp=0
+            // and license="", it's almost certainly a stub
+            if (repodata_record.contains("build_number") && repodata_record["build_number"] == 0)
+            {
+                repodata_record.erase("build_number");
+            }
+        }
+
         // Merge with index.json: insert() only adds MISSING keys.
         // - URL-derived: erased stub fields are filled from index.json
         // - Solver-derived: all fields already present, nothing added from index.json
