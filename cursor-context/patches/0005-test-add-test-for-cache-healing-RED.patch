@@ -1,7 +1,7 @@
-From 5498cb890aa57fe803cfdb71d1cb0ea1ce2e702e Mon Sep 17 00:00:00 2001
-From: Cursor Agent <cursoragent@cursor.com>
-Date: Sat, 29 Nov 2025 00:37:20 +0000
-Subject: [PATCH 06/13] test: add test for cache healing (RED)
+From e9c7d2298c7d07e243352073123f58117fc3c2e1 Mon Sep 17 00:00:00 2001
+From: Ben Mares <services-git-throwaway2@tensorial.com>
+Date: Sat, 29 Nov 2025 20:14:22 +0100
+Subject: [PATCH 05/10] test: add test for cache healing (RED)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -28,22 +28,22 @@ Healing flow (after fix):
 4. write_repodata_record() writes correct values
 
 Test Status: TEST FAILS (expected RED phase)
-- test cases: 1 | 1 failed
-- assertions: 2 | 1 passed | 1 failed
-- Failure: needs_extract() returns false (should return true)
+- test cases: 5 | 4 passed | 1 failed
+- assertions: 23 | 22 passed | 1 failed
+- needs_extract() returns false (should return true)
 
 Related: https://github.com/mamba-org/mamba/issues/4095
 ---
- .../tests/src/core/test_package_fetcher.cpp   | 111 ++++++++++++++++++
- 1 file changed, 111 insertions(+)
+ .../tests/src/core/test_package_fetcher.cpp   | 110 ++++++++++++++++++
+ 1 file changed, 110 insertions(+)
 
 diff --git a/libmamba/tests/src/core/test_package_fetcher.cpp b/libmamba/tests/src/core/test_package_fetcher.cpp
-index 0bd4579e..e7590d1f 100644
+index 9d0e8c0e..e7ea7138 100644
 --- a/libmamba/tests/src/core/test_package_fetcher.cpp
 +++ b/libmamba/tests/src/core/test_package_fetcher.cpp
-@@ -460,4 +460,115 @@ namespace
-         REQUIRE(repodata_record.contains("constrains"));
-         CHECK(repodata_record["constrains"].empty());
+@@ -528,4 +528,114 @@ namespace
+         // Extraction should throw std::logic_error due to missing _initialized
+         REQUIRE_THROWS_AS(pkg_fetcher.extract(options), std::logic_error);
      }
 +
 +    /**
@@ -129,10 +129,10 @@ index 0bd4579e..e7590d1f 100644
 +        // Step 5: Create PackageFetcher - it should detect corruption and require re-extraction
 +        PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
 +
-+        // BUG: With current code, has_valid_extracted_dir() returns true despite corruption
-+        // because it only validates checksums, not metadata correctness.
-+        // So needs_extract() returns false and the corrupted cache is used as-is.
-+        // After fix: should return true (cache invalid, needs re-extraction)
++        // Verify healing: corrupted cache should be detected and invalidated.
++        // The corruption signature (timestamp=0 AND license="") triggers
++        // has_valid_extracted_dir() to return false, causing re-extraction.
++        // Issue #4095: This heals caches corrupted by v2.1.1-v2.4.0.
 +        REQUIRE(pkg_fetcher.needs_extract());
 +
 +        ExtractOptions options;
@@ -150,8 +150,7 @@ index 0bd4579e..e7590d1f 100644
 +        nlohmann::json healed_repodata;
 +        repodata_file >> healed_repodata;
 +
-+        // BUG: These will FAIL because cache wasn't invalidated, so re-extraction didn't happen
-+        // After fix: correct values from index.json should be present
++        // After healing: correct values from index.json should be present
 +        CHECK(healed_repodata["license"] == "MIT");
 +        CHECK(healed_repodata["timestamp"] == 1234567890);
 +        CHECK(healed_repodata["build_number"] == 42);

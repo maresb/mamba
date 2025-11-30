@@ -1,40 +1,35 @@
-From 4132b874ecafbe35597d4309898359ae3b3b9816 Mon Sep 17 00:00:00 2001
-From: Cursor Agent <cursoragent@cursor.com>
-Date: Sat, 29 Nov 2025 00:30:26 +0000
-Subject: [PATCH 01/13] test: add tests for defaulted_keys population (RED)
+From ba0dff0a862c2a4afc7f5b189415b1459cf28682 Mon Sep 17 00:00:00 2001
+From: Ben Mares <services-git-throwaway2@tensorial.com>
+Date: Sat, 29 Nov 2025 19:15:23 +0100
+Subject: [PATCH 01/10] test: add tests for defaulted_keys population (RED)
 
 Add comprehensive tests verifying that PackageInfo::from_url() populates
 the defaulted_keys field to mark which fields have stub/default values.
-
-PURPOSE: Verify defaulted_keys is correctly populated for all URL types
-MOTIVATION: Issue #4095 - URL-derived packages write stub defaults instead
-of using correct values from index.json. The fix uses defaulted_keys with
-"_initialized" sentinel for fail-hard verification.
 
 Tests added for:
 - Conda packages (.conda, .tar.bz2): Standard stub fields
 - Wheel packages (.whl): Standard + build/build_string
 - TarGz packages (.tar.gz): Same as wheels
-- Git URLs (git+https://...): Most fields defaulted
+- Git URLs with #egg=: Most fields defaulted (minimal info from URL)
+- Git URLs WITHOUT #egg=: Also includes 'name' in defaulted_keys
 
 Each test verifies "_initialized" sentinel presence (required for all paths)
 plus appropriate stub field markers.
 
 Test Status: ALL TESTS FAIL (expected RED phase)
 - test cases: 1 | 1 failed
-- assertions: 5 | 5 failed
-- Failure: defaulted_keys is empty for all package types
+- assertions: 6 | 6 failed (all for missing _initialized sentinel)
 
 Related: https://github.com/mamba-org/mamba/issues/4095
 ---
- .../tests/src/specs/test_package_info.cpp     | 134 ++++++++++++++++++
- 1 file changed, 134 insertions(+)
+ .../tests/src/specs/test_package_info.cpp     | 172 ++++++++++++++++++
+ 1 file changed, 172 insertions(+)
 
 diff --git a/libmamba/tests/src/specs/test_package_info.cpp b/libmamba/tests/src/specs/test_package_info.cpp
-index 3e8dc771..85f62738 100644
+index 3e8dc771..fb9674ec 100644
 --- a/libmamba/tests/src/specs/test_package_info.cpp
 +++ b/libmamba/tests/src/specs/test_package_info.cpp
-@@ -303,4 +303,138 @@ namespace
+@@ -303,4 +303,176 @@ namespace
              REQUIRE(hash_fn(pkg) != hash_fn(pkg2));
          }
      }
@@ -167,8 +162,46 @@ index 3e8dc771..85f62738 100644
 +            CHECK(contains(pkg.defaulted_keys, "depends"));
 +            CHECK(contains(pkg.defaulted_keys, "constrains"));
 +
++            // Git URLs should also have these fields defaulted (not just the common ones)
++            // Git URLs only provide package_url and optionally name from #egg=
++            CHECK(contains(pkg.defaulted_keys, "version"));
++            CHECK(contains(pkg.defaulted_keys, "channel"));
++            CHECK(contains(pkg.defaulted_keys, "subdir"));
++            CHECK(contains(pkg.defaulted_keys, "fn"));
++
 +            // Should NOT contain name (set from #egg=) or url (always set)
 +            CHECK_FALSE(contains(pkg.defaulted_keys, "name"));
++            CHECK_FALSE(contains(pkg.defaulted_keys, "url"));
++        }
++
++        SECTION("Git URL without #egg= has name in defaulted_keys")
++        {
++            // PURPOSE: Verify git URLs WITHOUT #egg= fragment mark name as defaulted
++            // REASON: Without #egg=, the name cannot be derived from the URL
++            static constexpr std::string_view url = "git+https://github.com/urllib3/urllib3.git@1.19.1";
++            auto pkg = PackageInfo::from_url(url).value();
++
++            // Must have _initialized sentinel
++            REQUIRE(contains(pkg.defaulted_keys, "_initialized"));
++
++            // All the same fields as with #egg=
++            CHECK(contains(pkg.defaulted_keys, "build"));
++            CHECK(contains(pkg.defaulted_keys, "build_string"));
++            CHECK(contains(pkg.defaulted_keys, "build_number"));
++            CHECK(contains(pkg.defaulted_keys, "license"));
++            CHECK(contains(pkg.defaulted_keys, "timestamp"));
++            CHECK(contains(pkg.defaulted_keys, "track_features"));
++            CHECK(contains(pkg.defaulted_keys, "depends"));
++            CHECK(contains(pkg.defaulted_keys, "constrains"));
++            CHECK(contains(pkg.defaulted_keys, "version"));
++            CHECK(contains(pkg.defaulted_keys, "channel"));
++            CHECK(contains(pkg.defaulted_keys, "subdir"));
++            CHECK(contains(pkg.defaulted_keys, "fn"));
++
++            // WITHOUT #egg=, name should ALSO be defaulted (cannot be derived)
++            CHECK(contains(pkg.defaulted_keys, "name"));
++
++            // url is always set
 +            CHECK_FALSE(contains(pkg.defaulted_keys, "url"));
 +        }
 +    }

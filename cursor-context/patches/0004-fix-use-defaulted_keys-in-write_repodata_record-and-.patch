@@ -1,0 +1,273 @@
+From 3ee98dc3e4f2f47626dd96f736154c3ef7c9b50b Mon Sep 17 00:00:00 2001
+From: Ben Mares <services-git-throwaway2@tensorial.com>
+Date: Sat, 29 Nov 2025 20:08:10 +0100
+Subject: [PATCH 04/10] fix: use defaulted_keys in write_repodata_record() and
+ constructor.cpp (GREEN)
+
+Fix URL-derived package corruption and preserve channel patches by using
+the defaulted_keys mechanism in both write_repodata_record() and constructor.cpp.
+
+Implementation in package_fetcher.cpp:
+
+1. FAIL-HARD CHECK: Verify "_initialized" sentinel is present
+   - Throws std::logic_error if missing
+   - Catches any code path that fails to set defaulted_keys
+   - Re-throw std::logic_error from extract() to propagate programming bugs
+
+2. ERASE STUB FIELDS: Remove fields listed in defaulted_keys before merge
+   - URL-derived: erases build_number, license, timestamp, etc.
+   - Solver-derived: defaulted_keys = {"_initialized"}, nothing erased
+   - This preserves channel patches with intentionally empty arrays
+
+3. MERGE WITH INDEX.JSON: insert() fills erased fields
+   - URL-derived: gets correct values from index.json
+   - Solver-derived: all fields already present, index.json ignored
+
+Implementation in constructor.cpp:
+Same defaulted_keys erasure logic BUT no fail-hard check (intentional asymmetry).
+
+Tests added:
+- PackageFetcher::write_repodata_record fails without _initialized
+
+Test Status: ALL TESTS PASS (GREEN phase)
+- C++ tests: 4 | 4 passed (21 assertions)
+- Python tests: 3 | 3 passed
+
+Tests fixed:
+- write_repodata_record uses index.json for URL-derived metadata
+- write_repodata_record preserves channel patched empty depends
+- write_repodata_record preserves channel patched empty constrains
+
+Related: https://github.com/mamba-org/mamba/issues/4095
+---
+ libmamba/src/core/package_fetcher.cpp         | 65 ++++++++++++++----
+ .../tests/src/core/test_package_fetcher.cpp   | 66 +++++++++++++++++++
+ micromamba/src/constructor.cpp                | 43 ++++++++++++
+ 3 files changed, 162 insertions(+), 12 deletions(-)
+
+diff --git a/libmamba/src/core/package_fetcher.cpp b/libmamba/src/core/package_fetcher.cpp
+index e1014f74..f31476d3 100644
+--- a/libmamba/src/core/package_fetcher.cpp
++++ b/libmamba/src/core/package_fetcher.cpp
+@@ -299,7 +299,13 @@ namespace mamba
+                 update_urls_txt();
+                 update_monitor(cb, PackageExtractEvent::extract_success);
+             }
+-            catch (std::exception& e)
++            catch (const std::logic_error&)
++            {
++                // std::logic_error indicates a programming bug (e.g., missing _initialized
++                // sentinel). Re-throw to fail hard - these should never be silently ignored.
++                throw;
++            }
++            catch (const std::exception& e)
+             {
+                 Console::instance().print(filename() + " extraction failed");
+                 LOG_ERROR << "Error when extracting package: " << e.what();
+@@ -439,22 +445,57 @@ namespace mamba
+
+         nlohmann::json repodata_record = m_package_info;
+
+-        // For explicit spec files (URLs), m_package_info has empty depends/constrains arrays
+-        // that would overwrite the correct values from index.json. Remove these empty fields.
+-        if (auto depends_it = repodata_record.find("depends");
+-            depends_it != repodata_record.end() && depends_it->empty())
++        // Write repodata_record.json with correct metadata from index.json.
++        //
++        // The _initialized sentinel in defaulted_keys proves this PackageInfo was
++        // properly constructed. All creation paths MUST set it:
++        // - from_url(): sets {"_initialized", stub_field_names...}
++        // - make_package_info(): sets {"_initialized"} only (trust all fields)
++        //
++        // Note: from_json() does NOT set _initialized because it deserializes
++        // already-written cache files for display/query purposes. Those PackageInfo
++        // objects are never passed to this function - they're used for mamba list,
++        // dependency computation, etc.
++        //
++        // If _initialized is missing, it indicates a bug in a code path that creates
++        // PackageInfo objects destined for extraction. We fail hard to catch this.
++        //
++        // See GitHub issue #4095.
++        auto contains_initialized = [&]()
++        {
++            return std::find(
++                       m_package_info.defaulted_keys.begin(),
++                       m_package_info.defaulted_keys.end(),
++                       "_initialized"
++                   )
++                   != m_package_info.defaulted_keys.end();
++        };
++        if (!contains_initialized())
+         {
+-            repodata_record.erase("depends");
++            throw std::logic_error(
++                "PackageInfo missing _initialized sentinel in defaulted_keys. "
++                "This indicates a bug in the code path that created this PackageInfo. "
++                "See GitHub issue #4095."
++            );
+         }
+-        if (auto constrains_it = repodata_record.find("constrains");
+-            constrains_it != repodata_record.end() && constrains_it->empty())
++
++        // Erase fields listed in defaulted_keys (except "_initialized") before merging.
++        // - URL-derived packages: listed fields have stub values (0, "", [])
++        //   → erase them so index.json provides correct values
++        // - Solver-derived packages: only "_initialized" in list
++        //   → nothing erased, all fields preserved (including channel patches)
++        for (const auto& key : m_package_info.defaulted_keys)
+         {
+-            repodata_record.erase("constrains");
++            if (key != "_initialized")
++            {
++                repodata_record.erase(key);
++            }
+         }
+
+-        // To take correction of packages metadata (e.g. made using repodata patches) into account,
+-        // we insert the index into the repodata record to only add new fields from the index
+-        // while keeping the existing fields from the repodata record.
++        // Merge with index.json: insert() only adds MISSING keys.
++        // - URL-derived: erased stub fields are filled from index.json
++        // - Solver-derived: all fields already present, nothing added from index.json
++        //   (preserves channel patches with intentionally empty arrays)
+         repodata_record.insert(index.cbegin(), index.cend());
+
+         if (repodata_record.find("size") == repodata_record.end() || repodata_record["size"] == 0)
+diff --git a/libmamba/tests/src/core/test_package_fetcher.cpp b/libmamba/tests/src/core/test_package_fetcher.cpp
+index bc5ab92f..9d0e8c0e 100644
+--- a/libmamba/tests/src/core/test_package_fetcher.cpp
++++ b/libmamba/tests/src/core/test_package_fetcher.cpp
+@@ -5,6 +5,7 @@
+ // The full license is in the file LICENSE, distributed with this software.
+
+ #include <fstream>
++#include <stdexcept>
+
+ #include <catch2/catch_all.hpp>
+
+@@ -462,4 +463,69 @@ namespace
+         REQUIRE(repodata_record.contains("constrains"));
+         CHECK(repodata_record["constrains"].empty());
+     }
++
++    /**
++     * Test that extraction fails hard when _initialized sentinel is missing
++     *
++     * PURPOSE: Verify that write_repodata_record() throws std::logic_error when
++     * PackageInfo.defaulted_keys does not contain "_initialized".
++     *
++     * MOTIVATION: The _initialized sentinel proves the PackageInfo was properly
++     * constructed. If missing, it indicates a bug in a code path that creates
++     * PackageInfo objects. Failing hard ensures such bugs are caught immediately.
++     *
++     * Related: https://github.com/mamba-org/mamba/issues/4095
++     */
++    TEST_CASE("PackageFetcher::write_repodata_record fails without _initialized")
++    {
++        auto& ctx = mambatests::context();
++        TemporaryDirectory temp_dir;
++        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
++
++        // Create PackageInfo WITHOUT _initialized sentinel - this simulates a bug
++        specs::PackageInfo pkg_info;
++        pkg_info.name = "missing-init-pkg";
++        pkg_info.version = "1.0";
++        pkg_info.build_string = "h0_0";
++        pkg_info.filename = "missing-init-pkg-1.0-h0_0.tar.bz2";
++        // Deliberately NOT setting _initialized in defaulted_keys
++        pkg_info.defaulted_keys = { "license", "timestamp" };  // Missing "_initialized"!
++
++        const std::string pkg_basename = "missing-init-pkg-1.0-h0_0";
++
++        // Create minimal package structure
++        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
++        auto info_dir = pkg_extract_dir / "info";
++        fs::create_directories(info_dir);
++
++        nlohmann::json index_json;
++        index_json["name"] = "missing-init-pkg";
++        index_json["version"] = "1.0";
++        index_json["build"] = "h0_0";
++
++        {
++            std::ofstream index_file((info_dir / "index.json").std_path());
++            index_file << index_json.dump(2);
++        }
++
++        {
++            std::ofstream paths_file((info_dir / "paths.json").std_path());
++            paths_file << R"({"paths": [], "paths_version": 1})";
++        }
++
++        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
++        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
++        REQUIRE(fs::exists(tarball_path));
++
++        fs::remove_all(pkg_extract_dir);
++
++        PackageFetcher pkg_fetcher{ pkg_info, package_caches };
++
++        ExtractOptions options;
++        options.sparse = false;
++        options.subproc_mode = extract_subproc_mode::mamba_package;
++
++        // Extraction should throw std::logic_error due to missing _initialized
++        REQUIRE_THROWS_AS(pkg_fetcher.extract(options), std::logic_error);
++    }
+ }
+diff --git a/micromamba/src/constructor.cpp b/micromamba/src/constructor.cpp
+index a7bc4aca..29165c8b 100644
+--- a/micromamba/src/constructor.cpp
++++ b/micromamba/src/constructor.cpp
+@@ -150,6 +150,49 @@ construct(Configuration& config, const fs::u8path& prefix, bool extract_conda_pk
+
+             if (!repodata_record.is_null())
+             {
++                // Handle URL-derived packages using defaulted_keys mechanism.
++                //
++                // NOTE: Unlike write_repodata_record() in package_fetcher.cpp, we do NOT
++                // fail-hard when _initialized is missing. This is INTENTIONAL asymmetry:
++                //
++                // - package_fetcher.cpp: PackageInfo always comes from from_url() or
++                //   make_package_info(), both of which set _initialized. Missing sentinel
++                //   indicates a bug.
++                //
++                // - constructor.cpp: PackageInfo may come from cached repodata files
++                //   (via from_json()), which don't have _initialized. This is correct -
++                //   cached repodata should be trusted (it may contain channel patches).
++                //
++                // When _initialized IS present: URL-derived package, erase stub fields
++                // When _initialized is ABSENT: cached repodata, trust all fields
++                //
++                // The healing mechanism in has_valid_extracted_dir() handles corrupted
++                // caches from v2.1.1-v2.4.0 by detecting the corruption signature and
++                // triggering re-extraction.
++                //
++                // See GitHub issue #4095.
++                auto contains_initialized = [&]()
++                {
++                    return std::find(
++                               pkg_info.defaulted_keys.begin(),
++                               pkg_info.defaulted_keys.end(),
++                               "_initialized"
++                           )
++                           != pkg_info.defaulted_keys.end();
++                };
++
++                if (contains_initialized())
++                {
++                    // URL-derived package: erase stub fields before merging with index.json
++                    for (const auto& key : pkg_info.defaulted_keys)
++                    {
++                        if (key != "_initialized")
++                        {
++                            repodata_record.erase(key);
++                        }
++                    }
++                }
++
+                 // update values from index if there are any that are not part of the
+                 // repodata_record.json yet
+                 repodata_record.insert(index.cbegin(), index.cend());
+--
+2.50.1

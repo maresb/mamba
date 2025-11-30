@@ -1,47 +1,55 @@
-From 8c319fc0175d9ddee9a2deb77940c2c26fcf9755 Mon Sep 17 00:00:00 2001
-From: Cursor Agent <cursoragent@cursor.com>
-Date: Sat, 29 Nov 2025 00:34:47 +0000
-Subject: [PATCH 04/13] test: add tests for URL-derived metadata + channel
+From 05259f817d2f50a4f1cb941b282e46b87e40950c Mon Sep 17 00:00:00 2001
+From: Ben Mares <services-git-throwaway2@tensorial.com>
+Date: Sat, 29 Nov 2025 20:04:52 +0100
+Subject: [PATCH 03/10] test: add tests for URL-derived metadata and channel
  patch preservation (RED)
 
 Add tests demonstrating bugs in write_repodata_record():
+
+C++ Tests (test_package_fetcher.cpp):
 
 1. URL-derived metadata test:
    - Creates PackageInfo from URL (has stub defaults)
    - Creates tarball with correct index.json values
    - EXPECTS: repodata_record.json has correct values from index.json
-   - ACTUAL: Gets stub defaults (license="", timestamp=0, build_number=0)
+   - Tests: license, timestamp, build_number
 
 2. Channel patch preservation (depends):
    - Creates solver-derived PackageInfo with depends=[]
    - defaulted_keys = {"_initialized"} (only sentinel = trust all)
    - EXPECTS: Empty depends preserved in repodata_record.json
-   - ACTUAL: Gets ["broken-dependency"] from index.json (patch undone!)
+   - Verifies channel patches are NOT overwritten by index.json
 
 3. Channel patch preservation (constrains):
    - Same as above but for constrains field
 
-Test Status: ALL TESTS FAIL (expected RED phase)
-- test cases: 3 | 0 passed | 3 failed
-- assertions: 19 | 14 passed | 5 failed
+Python Integration Tests (test_constructor.py):
 
-Failures demonstrate:
-- license: "" (expected "MIT")
-- timestamp: 0 (expected 1234567890)
-- build_number: 0 (expected 42)
-- depends: ["broken-dependency"] (expected [])
-- constrains: ["removed-constraint"] (expected [])
+1. test_url_derived_metadata_from_index_json
+2. test_consistent_field_presence
+3. test_track_features_omitted_when_empty
+
+Note: Python tests PASS because constructor.cpp uses index.json as base
+when no cached repodata exists. This validates the existing behavior.
+
+Python test improvements:
+- Use try-finally in teardown for robust env var restoration
+
+Test Status:
+- C++ tests: 3 | 0 passed | 3 failed (RED - demonstrates bugs)
+- Python tests: 3 | 3 passed (validates assumptions)
 
 Related: https://github.com/mamba-org/mamba/issues/4095
 ---
- .../tests/src/core/test_package_fetcher.cpp   | 267 ++++++++++++++++++
- 1 file changed, 267 insertions(+)
+ .../tests/src/core/test_package_fetcher.cpp   | 269 ++++++++++++++++++
+ micromamba/tests/test_constructor.py          | 197 +++++++++++++
+ 2 files changed, 466 insertions(+)
 
 diff --git a/libmamba/tests/src/core/test_package_fetcher.cpp b/libmamba/tests/src/core/test_package_fetcher.cpp
-index e06f0524..0bd4579e 100644
+index e06f0524..bc5ab92f 100644
 --- a/libmamba/tests/src/core/test_package_fetcher.cpp
 +++ b/libmamba/tests/src/core/test_package_fetcher.cpp
-@@ -193,4 +193,271 @@ namespace
+@@ -193,4 +193,273 @@ namespace
          REQUIRE(repodata_record["constrains"].size() == 1);
          REQUIRE(repodata_record["constrains"][0] == "pytz");
      }
@@ -137,8 +145,8 @@ index e06f0524..0bd4579e 100644
 +        nlohmann::json repodata_record;
 +        repodata_file >> repodata_record;
 +
-+        // BUG: These will FAIL - gets stub defaults instead of index.json values
-+        // After fix: Should use correct values from index.json
++        // Verify repodata_record.json contains correct values from index.json
++        // Issue #4095: URL-derived packages should NOT have stub defaults
 +        CHECK(repodata_record["license"] == "MIT");
 +        CHECK(repodata_record["timestamp"] == 1234567890);
 +        CHECK(repodata_record["build_number"] == 42);
@@ -175,9 +183,9 @@ index e06f0524..0bd4579e 100644
 +        pkg_info.version = "1.0";
 +        pkg_info.build_string = "h123456_0";
 +        pkg_info.filename = "patched-pkg-1.0-h123456_0.tar.bz2";
-+        pkg_info.dependencies = {};                      // Intentionally empty from channel patch
-+        pkg_info.defaulted_keys = { "_initialized" };    // Only sentinel = solver-derived, trust all
-+        pkg_info.timestamp = 1234567890;                 // Non-zero = proves not URL-derived stub
++        pkg_info.dependencies = {};                    // Intentionally empty from channel patch
++        pkg_info.defaulted_keys = { "_initialized" };  // Only sentinel = solver-derived, trust all
++        pkg_info.timestamp = 1234567890;               // Non-zero = proves not URL-derived stub
 +
 +        const std::string pkg_basename = "patched-pkg-1.0-h123456_0";
 +
@@ -229,8 +237,9 @@ index e06f0524..0bd4579e 100644
 +        nlohmann::json repodata_record;
 +        repodata_file >> repodata_record;
 +
-+        // BUG: This will FAIL - the empty array patch gets overwritten with index.json value
-+        // After fix: Should preserve the intentionally empty depends from the patch
++        // Verify channel patch is preserved (empty depends NOT replaced by index.json)
++        // Issue #4095: Solver-derived packages with defaulted_keys={"_initialized"}
++        // should trust ALL fields including intentionally empty arrays
 +        REQUIRE(repodata_record.contains("depends"));
 +        CHECK(repodata_record["depends"].empty());
 +    }
@@ -254,9 +263,9 @@ index e06f0524..0bd4579e 100644
 +        pkg_info.version = "1.0";
 +        pkg_info.build_string = "h123456_0";
 +        pkg_info.filename = "patched-constrains-pkg-1.0-h123456_0.tar.bz2";
-+        pkg_info.constrains = {};                        // Intentionally empty from channel patch
-+        pkg_info.defaulted_keys = { "_initialized" };    // Only sentinel = solver-derived, trust all
-+        pkg_info.timestamp = 1234567890;                 // Non-zero = proves not URL-derived stub
++        pkg_info.constrains = {};                      // Intentionally empty from channel patch
++        pkg_info.defaulted_keys = { "_initialized" };  // Only sentinel = solver-derived, trust all
++        pkg_info.timestamp = 1234567890;               // Non-zero = proves not URL-derived stub
 +
 +        const std::string pkg_basename = "patched-constrains-pkg-1.0-h123456_0";
 +
@@ -307,11 +316,226 @@ index e06f0524..0bd4579e 100644
 +        nlohmann::json repodata_record;
 +        repodata_file >> repodata_record;
 +
-+        // BUG: This will FAIL - the empty array patch gets overwritten with index.json value
-+        // After fix: Should preserve the intentionally empty constrains from the patch
++        // Verify channel patch is preserved (empty constrains NOT replaced by index.json)
++        // Issue #4095: Solver-derived packages with defaulted_keys={"_initialized"}
++        // should trust ALL fields including intentionally empty arrays
 +        REQUIRE(repodata_record.contains("constrains"));
 +        CHECK(repodata_record["constrains"].empty());
 +    }
  }
+diff --git a/micromamba/tests/test_constructor.py b/micromamba/tests/test_constructor.py
+index 5ce8e757..bb8873c3 100644
+--- a/micromamba/tests/test_constructor.py
++++ b/micromamba/tests/test_constructor.py
+@@ -1,8 +1,19 @@
++"""
++Tests for micromamba constructor command.
++
++Includes tests for:
++- Basic package extraction
++- URL-derived metadata handling (issue #4095)
++- Consistent field presence (depends/constrains arrays)
++"""
++
+ import glob
+ import json
+ import os
+ import shutil
+ import subprocess
++import tarfile
++import tempfile
+
+ from . import helpers
+
+@@ -83,3 +94,189 @@ class TestInstall:
+             assert repodata_record["md5"] == "123412341234"
+             assert repodata_record["url"] == "http://testurl.com/conda-forge/linux-64/" + pkg
+             assert repodata_record["depends"] == index["depends"]
++
++
++class TestURLDerivedMetadata:
++    """
++    Tests for URL-derived metadata handling (GitHub issue #4095).
++
++    When packages are installed from URLs (not from solver), the PackageInfo
++    is created via from_url() which only has stub values for metadata fields.
++    The constructor should merge these with values from index.json.
++
++    Also tests consistent field presence:
++    - depends and constrains should always be present as arrays
++    - track_features should be omitted when empty
++    """
++
++    @classmethod
++    def setup_class(cls):
++        """Create a test package with known metadata."""
++        cls.temp_dir = tempfile.mkdtemp(prefix="mamba_test_")
++        cls.root_prefix = os.path.join(cls.temp_dir, "root")
++        cls.pkgs_dir = os.path.join(cls.root_prefix, "pkgs")
++        os.makedirs(cls.pkgs_dir, exist_ok=True)
++
++        # Save original env vars
++        cls.orig_root_prefix = os.environ.get("MAMBA_ROOT_PREFIX")
++        cls.orig_prefix = os.environ.get("CONDA_PREFIX")
++
++        # Set test env vars
++        os.environ["MAMBA_ROOT_PREFIX"] = cls.root_prefix
++        os.environ["CONDA_PREFIX"] = cls.root_prefix
++
++        # Create a test package with specific metadata in index.json
++        cls.pkg_name = "testmeta-1.0-h0_42"
++        cls.pkg_filename = cls.pkg_name + ".tar.bz2"
++        cls.pkg_path = os.path.join(cls.pkgs_dir, cls.pkg_filename)
++
++        # Create the index.json with specific values that differ from URL-derived stubs
++        cls.index_json = {
++            "name": "testmeta",
++            "version": "1.0",
++            "build": "h0_42",
++            "build_number": 42,
++            "license": "MIT",
++            "timestamp": 1234567890,
++            "depends": ["python >=3.8"],
++            "constrains": ["otherpkg >=2.0"],
++            # No track_features - should be omitted in output
++        }
++
++        # Create the package tarball
++        cls._create_test_package()
++
++        # Create urls file
++        urls_path = os.path.join(cls.pkgs_dir, "urls")
++        with open(urls_path, "w") as f:
++            # URL with md5 hash fragment (as constructor expects)
++            f.write(f"http://test.example.com/channel/linux-64/{cls.pkg_filename}#abc123def456\n")
++
++    @classmethod
++    def _create_test_package(cls):
++        """Create a minimal conda package tarball."""
++        # Create package structure in memory
++        pkg_dir = os.path.join(cls.temp_dir, "pkg_build", cls.pkg_name)
++        info_dir = os.path.join(pkg_dir, "info")
++        os.makedirs(info_dir, exist_ok=True)
++
++        # Write index.json
++        with open(os.path.join(info_dir, "index.json"), "w") as f:
++            json.dump(cls.index_json, f)
++
++        # Write minimal paths.json
++        with open(os.path.join(info_dir, "paths.json"), "w") as f:
++            json.dump({"paths": [], "paths_version": 1}, f)
++
++        # Create tarball
++        with tarfile.open(cls.pkg_path, "w:bz2") as tar:
++            tar.add(info_dir, arcname="info")
++
++    @classmethod
++    def teardown_class(cls):
++        """Clean up test directory and restore env vars."""
++        try:
++            shutil.rmtree(cls.temp_dir)
++        finally:
++            # Always restore env vars, even if rmtree fails
++            if cls.orig_root_prefix is not None:
++                os.environ["MAMBA_ROOT_PREFIX"] = cls.orig_root_prefix
++            else:
++                os.environ.pop("MAMBA_ROOT_PREFIX", None)
++            if cls.orig_prefix is not None:
++                os.environ["CONDA_PREFIX"] = cls.orig_prefix
++            else:
++                os.environ.pop("CONDA_PREFIX", None)
++
++    def test_url_derived_metadata_from_index_json(self):
++        """
++        Test that URL-derived packages get metadata from index.json.
++
++        This is the core test for GitHub issue #4095. When packages are
++        installed from URLs, the repodata_record.json should contain
++        correct values from index.json, not stub values.
++
++        Specifically tests:
++        - license comes from index.json (not empty string)
++        - timestamp comes from index.json (not 0)
++        - build_number comes from index.json (not 0)
++        - depends comes from index.json
++        - constrains comes from index.json
++        """
++        # Run constructor to extract packages
++        constructor("--prefix", self.root_prefix, "--extract-conda-pkgs")
++
++        # Read the generated repodata_record.json
++        extracted_dir = os.path.join(self.pkgs_dir, self.pkg_name)
++        repodata_path = os.path.join(extracted_dir, "info", "repodata_record.json")
++
++        assert os.path.exists(repodata_path), f"repodata_record.json not found at {repodata_path}"
++
++        with open(repodata_path) as f:
++            repodata_record = json.load(f)
++
++        # Core issue #4095 checks: these values should come from index.json,
++        # not from URL-derived stubs (which would be 0, "", [])
++        assert repodata_record.get("license") == "MIT", (
++            f"license should be 'MIT' from index.json, got '{repodata_record.get('license')}'"
++        )
++        assert repodata_record.get("timestamp") == 1234567890, (
++            f"timestamp should be 1234567890 from index.json, got {repodata_record.get('timestamp')}"
++        )
++        assert repodata_record.get("build_number") == 42, (
++            f"build_number should be 42 from index.json, got {repodata_record.get('build_number')}"
++        )
++
++        # Check depends and constrains match index.json
++        assert repodata_record.get("depends") == ["python >=3.8"], (
++            f"depends should match index.json, got {repodata_record.get('depends')}"
++        )
++        assert repodata_record.get("constrains") == ["otherpkg >=2.0"], (
++            f"constrains should match index.json, got {repodata_record.get('constrains')}"
++        )
++
++    def test_consistent_field_presence(self):
++        """
++        Test that depends and constrains are always present as arrays.
++
++        Even if they're missing from index.json, they should be present
++        as empty arrays in repodata_record.json (matching conda behavior).
++        """
++        # This test reuses the extraction from the previous test
++        extracted_dir = os.path.join(self.pkgs_dir, self.pkg_name)
++        repodata_path = os.path.join(extracted_dir, "info", "repodata_record.json")
++
++        if not os.path.exists(repodata_path):
++            # Run constructor if not already done
++            constructor("--prefix", self.root_prefix, "--extract-conda-pkgs")
++
++        with open(repodata_path) as f:
++            repodata_record = json.load(f)
++
++        # depends and constrains should be present as arrays
++        assert "depends" in repodata_record, "depends should be present"
++        assert isinstance(repodata_record["depends"], list), "depends should be a list"
++
++        assert "constrains" in repodata_record, "constrains should be present"
++        assert isinstance(repodata_record["constrains"], list), "constrains should be a list"
++
++    def test_track_features_omitted_when_empty(self):
++        """
++        Test that track_features is omitted when empty.
++
++        Matches conda behavior to reduce JSON noise.
++        """
++        extracted_dir = os.path.join(self.pkgs_dir, self.pkg_name)
++        repodata_path = os.path.join(extracted_dir, "info", "repodata_record.json")
++
++        if not os.path.exists(repodata_path):
++            constructor("--prefix", self.root_prefix, "--extract-conda-pkgs")
++
++        with open(repodata_path) as f:
++            repodata_record = json.load(f)
++
++        # track_features was not in index.json, so it should not be in output
++        # (or if present, should not be an empty string/array)
++        if "track_features" in repodata_record:
++            tf = repodata_record["track_features"]
++            assert tf, f"track_features should be omitted when empty, got '{tf}'"
 --
 2.50.1

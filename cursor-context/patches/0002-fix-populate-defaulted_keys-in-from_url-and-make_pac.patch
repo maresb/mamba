@@ -1,0 +1,176 @@
+From 05ce18afa8ddd0f0fdf54aec52e4e505f754d960 Mon Sep 17 00:00:00 2001
+From: Ben Mares <services-git-throwaway2@tensorial.com>
+Date: Sat, 29 Nov 2025 19:26:01 +0100
+Subject: [PATCH 02/10] fix: populate defaulted_keys in from_url() and
+ make_package_info() (GREEN)
+
+Populate the defaulted_keys field in PackageInfo creation paths to mark
+which fields have stub/default values. This enables write_repodata_record()
+to erase these stubs before merging with index.json.
+
+The "_initialized" sentinel is placed first in defaulted_keys for all paths.
+This enables fail-hard verification: write_repodata_record() will throw if
+_initialized is missing, catching any code path that fails to set defaulted_keys.
+
+Changes in from_url() (package_info.cpp):
+- Conda (.conda, .tar.bz2): _initialized + build_number, license, timestamp,
+  track_features, depends, constrains
+- Wheel (.whl): Above + build, build_string (not in wheel filename)
+- TarGz (.tar.gz): Same as wheels
+- Git URLs: _initialized + version, channel, subdir, fn, build, build_string,
+  build_number, license, timestamp, track_features, depends, constrains
+- Git URLs WITHOUT #egg=: Also includes 'name' (cannot be derived from URL)
+
+Changes in make_package_info() (helpers.cpp):
+- Set defaulted_keys = {"_initialized"} for solver-derived packages
+- Solver packages have authoritative metadata from channel repodata
+- Only _initialized signals "trust all fields" (including patches)
+
+Updated header comment (package_info.hpp):
+- Removed outdated WARNING about make_package_info not setting defaulted_keys
+- New comment accurately describes the current behavior
+
+The asymmetry is intentional:
+- URL-derived: list stub fields to erase
+- Solver-derived: trust all fields, erase nothing
+
+Test Status: ALL TESTS PASS (GREEN phase)
+- test cases: 3 | 3 passed
+- assertions: 164 | 164 passed
+
+Tests fixed:
+- PackageInfo::from_url populates defaulted_keys (all 6 sections)
+
+Related: https://github.com/mamba-org/mamba/issues/4095
+---
+ libmamba/include/mamba/specs/package_info.hpp |  6 ++-
+ libmamba/src/solver/libsolv/helpers.cpp       | 12 ++++++
+ libmamba/src/specs/package_info.cpp           | 42 +++++++++++++++++++
+ 3 files changed, 58 insertions(+), 2 deletions(-)
+
+diff --git a/libmamba/include/mamba/specs/package_info.hpp b/libmamba/include/mamba/specs/package_info.hpp
+index cbe996ad..aa18b4b3 100644
+--- a/libmamba/include/mamba/specs/package_info.hpp
++++ b/libmamba/include/mamba/specs/package_info.hpp
+@@ -52,8 +52,10 @@ namespace mamba::specs
+         std::vector<std::string> track_features = {};
+         std::vector<std::string> dependencies = {};
+         std::vector<std::string> constrains = {};
+-        // WARNING Be aware that `defaulted_keys` value, if set later,
+-        // is not passed when going through `make_package_info` from libsolv
++        // Tracks which fields have stub/default values that should be replaced by index.json.
++        // Set by from_url() with field names, and by make_package_info() with {"_initialized"}.
++        // The "_initialized" sentinel indicates the PackageInfo was properly constructed.
++        // See GitHub issue #4095.
+         std::vector<std::string> defaulted_keys = {};
+         NoArchType noarch = NoArchType::No;
+         std::size_t size = 0;
+diff --git a/libmamba/src/solver/libsolv/helpers.cpp b/libmamba/src/solver/libsolv/helpers.cpp
+index f1effd9b..183eb524 100644
+--- a/libmamba/src/solver/libsolv/helpers.cpp
++++ b/libmamba/src/solver/libsolv/helpers.cpp
+@@ -146,6 +146,18 @@ namespace mamba::solver::libsolv
+             std::transform(feats.begin(), feats.end(), std::back_inserter(out.track_features), id_to_str);
+         }
+
++        // Set "_initialized" sentinel to indicate this PackageInfo was properly constructed.
++        // Solver-derived packages have authoritative metadata from channel repodata (potentially
++        // patched). We set only _initialized (no stub field names) to signal "trust all fields".
++        // This preserves channel patches with intentionally empty arrays.
++        //
++        // The asymmetry with from_url() is intentional:
++        // - from_url(): {"_initialized", "license", ...} = listed fields are stubs to erase
++        // - make_package_info(): {"_initialized"} = trust ALL fields, erase nothing
++        //
++        // See issue #4095.
++        out.defaulted_keys = { "_initialized" };
++
+         return out;
+     }
+
+diff --git a/libmamba/src/specs/package_info.cpp b/libmamba/src/specs/package_info.cpp
+index 29bfa01a..534f7782 100644
+--- a/libmamba/src/specs/package_info.cpp
++++ b/libmamba/src/specs/package_info.cpp
+@@ -95,6 +95,13 @@ namespace mamba::specs
+
+                 // Name
+                 out.name = head.value();  // There may be '-' in the name
++
++                // Mark fields that have stub/default values for URL-derived conda packages.
++                // These fields are NOT available from the URL and will use struct defaults.
++                // The "_initialized" sentinel enables fail-hard verification in
++                // write_repodata_record(). See issue #4095.
++                out.defaulted_keys = { "_initialized",   "build_number", "license",   "timestamp",
++                                       "track_features", "depends",      "constrains" };
+             }
+             // PackageType::Wheel (.whl):
+             // {pkg name}-{version}-{build tag (optional)}-{python tag}-{abi tag}-{platform tag}.whl
+@@ -140,6 +147,13 @@ namespace mamba::specs
+                     out.version = tail;
+                     // The head is the name
+                     out.name = head.value();  // There may be '-' in the name
++
++                    // Mark fields that have stub/default values for URL-derived wheel packages.
++                    // Wheels don't have build info in the filename, so add build/build_string.
++                    // The "_initialized" sentinel enables fail-hard verification. See issue #4095.
++                    out.defaulted_keys = { "_initialized",   "build",   "build_string",
++                                           "build_number",   "license", "timestamp",
++                                           "track_features", "depends", "constrains" };
+                 }
+                 else
+                 {
+@@ -156,6 +170,13 @@ namespace mamba::specs
+
+                     // Name
+                     out.name = head.value();  // There may be '-' in the name
++
++                    // Mark fields that have stub/default values for URL-derived wheel packages.
++                    // Wheels don't have build info in the filename, so add build/build_string.
++                    // The "_initialized" sentinel enables fail-hard verification. See issue #4095.
++                    out.defaulted_keys = { "_initialized",   "build",   "build_string",
++                                           "build_number",   "license", "timestamp",
++                                           "track_features", "depends", "constrains" };
+                 }
+             }
+             // PackageType::TarGz (.tar.gz): {pkg name}-{version}.tar.gz
+@@ -173,6 +194,12 @@ namespace mamba::specs
+
+                 // Name
+                 out.name = head.value();  // There may be '-' in the name
++
++                // Mark fields that have stub/default values for URL-derived tar.gz packages.
++                // Similar to wheels: no build info in filename. See issue #4095.
++                out.defaulted_keys = { "_initialized",   "build",   "build_string",
++                                       "build_number",   "license", "timestamp",
++                                       "track_features", "depends", "constrains" };
+             }
+
+             return out;
+@@ -247,9 +274,24 @@ namespace mamba::specs
+             auto pkg = PackageInfo();
+             pkg.package_url = str;
+             const std::string pkg_name_marker = "#egg=";
++            bool has_egg_name = false;
+             if (const auto idx = str.rfind(pkg_name_marker); idx != std::string_view::npos)
+             {
+                 pkg.name = str.substr(idx + pkg_name_marker.length());
++                has_egg_name = true;
++            }
++
++            // Mark fields that have stub/default values for git URL packages.
++            // Git URLs only provide package_url and optionally name (from #egg=).
++            // All other fields use struct defaults. See issue #4095.
++            pkg.defaulted_keys = { "_initialized", "version",   "channel",        "subdir",
++                                   "fn",           "build",     "build_string",   "build_number",
++                                   "license",      "timestamp", "track_features", "depends",
++                                   "constrains" };
++            // If #egg= is absent, name is also defaulted (empty string)
++            if (!has_egg_name)
++            {
++                pkg.defaulted_keys.push_back("name");
+             }
+             return pkg;
+         }
+--
+2.50.1

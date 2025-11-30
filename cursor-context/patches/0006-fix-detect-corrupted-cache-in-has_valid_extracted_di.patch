@@ -1,0 +1,89 @@
+From c9f5e0a856cbcb7d8ae7b7cf4d0c15c132061e0e Mon Sep 17 00:00:00 2001
+From: Ben Mares <services-git-throwaway2@tensorial.com>
+Date: Sat, 29 Nov 2025 20:18:30 +0100
+Subject: [PATCH 06/10] fix: detect corrupted cache in
+ has_valid_extracted_dir() (GREEN)
+
+Add corruption detection to has_valid_extracted_dir() to heal caches
+corrupted by v2.1.1-v2.4.0 bug.
+
+Corruption signature: timestamp == 0 AND license == ""
+
+When detected:
+1. Log info message about the corruption detection
+2. Return valid=false to invalidate the cache entry
+3. This triggers re-extraction from the tarball
+4. write_repodata_record() then writes correct values using index.json
+
+Why this signature is reliable (low false-positive risk):
+- timestamp=0 is extremely rare for legitimate packages (build tools set it)
+- Both conditions must be true (reduces false positives significantly)
+- license="" alone could be legitimate (some packages have no license)
+- timestamp=0 alone could theoretically be legitimate
+- Together they reliably indicate v2.1.1-v2.4.0 corruption
+
+Even if a false positive occurs:
+- Only consequence is unnecessary re-extraction (wasted work)
+- NOT data corruption - re-extracted package has correct values
+- This is acceptable given the rarity of the combination
+
+Added is_number()/is_string() type checks for defensive programming to
+prevent potential type_error exceptions if fields have unexpected types.
+
+Test Status: ALL TESTS PASS (GREEN phase)
+- test cases: 5 | 5 passed
+- assertions: 28 | 28 passed
+
+Tests fixed:
+- PackageFetcher heals existing corrupted cache
+
+Related: https://github.com/mamba-org/mamba/issues/4095
+---
+ libmamba/src/core/package_cache.cpp | 32 +++++++++++++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+diff --git a/libmamba/src/core/package_cache.cpp b/libmamba/src/core/package_cache.cpp
+index cd49e6b7..4f85ae06 100644
+--- a/libmamba/src/core/package_cache.cpp
++++ b/libmamba/src/core/package_cache.cpp
+@@ -359,6 +359,38 @@ namespace mamba
+                             }
+                         }
+                     }
++
++                    // HEALING: Detect corrupted cache from buggy versions (v2.1.1-v2.4.0).
++                    //
++                    // Corruption signature: timestamp == 0 AND license == ""
++                    //
++                    // Why this signature is safe (low false-positive risk):
++                    // - Both conditions must be true (very specific)
++                    // - Modern build tools virtually always set timestamps
++                    // - Packages typically have license information
++                    // - The combination is extremely rare for legitimate packages
++                    //
++                    // Even if a false positive occurs:
++                    // - The only consequence is unnecessary re-extraction
++                    // - This is wasted work, NOT data corruption
++                    // - The re-extracted package will have correct metadata
++                    //
++                    // When corruption is detected:
++                    // 1. Return valid=false to invalidate this cache entry
++                    // 2. Caller triggers re-extraction from tarball
++                    // 3. write_repodata_record() writes correct values using index.json
++                    //
++                    // See GitHub issue #4095.
++                    if (valid && repodata_record.contains("timestamp")
++                        && repodata_record["timestamp"].is_number()
++                        && repodata_record["timestamp"] == 0 && repodata_record.contains("license")
++                        && repodata_record["license"].is_string() && repodata_record["license"] == "")
++                    {
++                        LOG_INFO << "Detected corrupted metadata in cache (v2.1.1-v2.4.0 bug, "
++                                    "issue #4095), will re-extract: "
++                                 << extracted_dir.string();
++                        valid = false;
++                    }
+                 }
+                 catch (const nlohmann::json::exception& e)
+                 {
+--
+2.50.1
