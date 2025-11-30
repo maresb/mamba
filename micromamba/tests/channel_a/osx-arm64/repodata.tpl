@@ -37,7 +37,7 @@
       "build": "abc",
       "build_number": 0,
       "depends": [
-        "a", "__glibc=2.39"
+        "a"GLIBC_PLACEHOLDER
       ],
       "license": "BSD",
       "license_family": "BSD",

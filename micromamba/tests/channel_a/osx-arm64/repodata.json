@@ -1,6 +1,6 @@
 {
   "info": {
-    "subdir": "linux-64"
+    "subdir": "osx-arm64"
   },
   "packages": {
     "A_0.1.0.tar.bz2": {
@@ -14,7 +14,7 @@
       "name": "a",
       "sha256": "398831eff682d2c975b360d64656d8f475cbc1f1b6d0ee33d86285190e7ee4d1",
       "size": 222503,
-      "subdir": "linux-64",
+      "subdir": "osx-arm64",
       "timestamp": 1578950023135,
       "version": "0.1.0"
     },
@@ -29,7 +29,7 @@
       "name": "a",
       "sha256": "398831eff682d2c975b360d64656d8f475cbc1f1b6d0ee33d86285190e7ee4d1",
       "size": 222503,
-      "subdir": "linux-64",
+      "subdir": "osx-arm64",
       "timestamp": 1578950023135,
       "version": "0.2.0"
     },
@@ -45,7 +45,7 @@
       "name": "b",
       "sha256": "398831eff682d2c975b360d64656d8f475cbc1f1b6d0ee33d86285190e7ee4d1",
       "size": 222503,
-      "subdir": "linux-64",
+      "subdir": "osx-arm64",
       "timestamp": 1578950023135,
       "version": "0.1.0"
     }
