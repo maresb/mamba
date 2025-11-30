@@ -46,6 +46,7 @@ pybind11 = ">=3.0.0"
 # dev dependencies
 pre-commit = "*"
 ccache = "*"
+memory_profiler = "*"
 
 # ============================================================================
 # Tasks for building and testing
@@ -81,7 +82,7 @@ test-cpp = "./build/libmamba/tests/test_libmamba"
 # Run C++ PackageInfo tests
 test-cpp-package-info = "./build/libmamba/tests/test_libmamba 'PackageInfo*'"
 
-# Run C++ PackageFetcher tests  
+# Run C++ PackageFetcher tests
 test-cpp-package-fetcher = "./build/libmamba/tests/test_libmamba 'PackageFetcher*'"
 
 # Run Python constructor tests (TestURLDerivedMetadata)
