@@ -46,6 +46,7 @@ pybind11 = ">=3.0.0"
 # dev dependencies
 pre-commit = "*"
 ccache = "*"
+pip = ">=25.3,<26"
 
 # ============================================================================
 # Tasks for building and testing
