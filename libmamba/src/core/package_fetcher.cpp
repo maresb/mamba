@@ -462,17 +462,57 @@ namespace mamba
             );
         }
 
-        // Erase fields listed in defaulted_keys (except "_initialized") before merging.
-        // - URL-derived packages: listed fields have stub values (0, "", [])
-        //   → erase them so index.json provides correct values
-        // - Solver-derived packages: only "_initialized" in list
-        //   → nothing erased, all fields preserved (including channel patches)
-        for (const auto& key : m_package_info.defaulted_keys)
+        // Determine which keys should be erased before merging with index.json.
+        std::vector<std::string> keys_to_erase;
+
+        // Check if this is a URL-derived package (has stub field names in defaulted_keys)
+        // vs a solver-derived package (only has "_initialized")
+        bool has_explicit_stub_fields = m_package_info.defaulted_keys.size() > 1;
+
+        if (has_explicit_stub_fields)
         {
-            if (key != "_initialized")
+            // URL-derived package: use defaulted_keys list (except "_initialized")
+            for (const auto& key : m_package_info.defaulted_keys)
             {
-                repodata_record.erase(key);
+                if (key != "_initialized")
+                {
+                    keys_to_erase.push_back(key);
+                }
             }
+        }
+        else
+        {
+            // Solver-derived package: check for stub indicators that suggest corrupted
+            // metadata (from buggy versions v2.1.1-v2.4.0) or from URL specs going through
+            // the solver path without proper channel repodata.
+            // Use conservative predicate: timestamp==0 AND (license empty OR build_number==0)
+            // to avoid false positives on legitimate packages.
+            // See GitHub issue #4095 for details.
+            bool has_stub_timestamp = (m_package_info.timestamp == 0);
+            bool has_stub_license = m_package_info.license.empty();
+            bool has_stub_build_number = (m_package_info.build_number == 0);
+
+            if (has_stub_timestamp && (has_stub_license || has_stub_build_number))
+            {
+                LOG_INFO << "Detected stub metadata in solver-derived package '"
+                         << m_package_info.name << "', will merge from index.json";
+                // Erase all stub fields so index.json can fill them
+                keys_to_erase = {
+                    "build_number",
+                    "license",
+                    "timestamp",
+                    "track_features",
+                    "depends",
+                    "constrains"
+                };
+            }
+            // else: solver-derived with non-stub values → trust all fields (including patches)
+        }
+
+        // Erase keys that should be filled from index.json
+        for (const auto& key : keys_to_erase)
+        {
+            repodata_record.erase(key);
         }
 
         // Merge with index.json: insert() only adds MISSING keys.
