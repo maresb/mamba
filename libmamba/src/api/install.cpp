@@ -25,6 +25,7 @@
 #include "mamba/download/downloader.hpp"
 #include "mamba/fs/filesystem.hpp"
 #include "mamba/solver/libsolv/solver.hpp"
+#include "mamba/specs/archive.hpp"
 #include "mamba/util/path_manip.hpp"
 #include "mamba/util/string.hpp"
 
@@ -32,6 +33,21 @@
 
 namespace mamba
 {
+    namespace
+    {
+        // Check if all specs are URL-like (have archive extension).
+        // When specs are URLs, we use explicit install to preserve defaulted_keys.
+        // See issue #4095.
+        bool all_specs_are_urls(const std::vector<std::string>& specs)
+        {
+            return !specs.empty()
+                   && std::all_of(
+                       specs.begin(),
+                       specs.end(),
+                       [](const std::string& spec) { return specs::has_archive_extension(spec); }
+                   );
+        }
+    }
 
     const auto& truthy_values(const std::string platform)
     {
@@ -362,7 +378,13 @@ namespace mamba
         }
         else if (!install_specs.empty())
         {
-            if (use_explicit)
+            // Use explicit install when:
+            // 1. explicit_install flag is set (e.g., from @EXPLICIT file)
+            // 2. All specs are URLs (have archive extension like .tar.bz2, .conda)
+            // This ensures URL-derived packages go through from_url() which properly
+            // sets defaulted_keys to distinguish stub values from real metadata.
+            // See issue #4095.
+            if (use_explicit || all_specs_are_urls(install_specs))
             {
                 install_explicit_specs(ctx, channel_context, install_specs, false);
             }
