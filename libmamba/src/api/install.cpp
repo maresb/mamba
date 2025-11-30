@@ -25,6 +25,7 @@
 #include "mamba/download/downloader.hpp"
 #include "mamba/fs/filesystem.hpp"
 #include "mamba/solver/libsolv/solver.hpp"
+#include "mamba/specs/archive.hpp"
 #include "mamba/util/path_manip.hpp"
 #include "mamba/util/string.hpp"
 
@@ -739,16 +740,57 @@ namespace mamba
         bool remove_prefix_on_failure
     )
     {
-        auto is_retry = false;
-        return install_specs_impl(
-            ctx,
-            channel_context,
-            config,
-            specs,
-            create_env,
-            remove_prefix_on_failure,
-            is_retry
-        );
+        // Detect URL specs (ending in .tar.bz2, .conda, .whl, .tar.gz) and route them
+        // to the explicit install path. URL specs need to go through from_url() to get
+        // the correct defaulted_keys set, otherwise stub values like timestamp=0 won't
+        // be replaced by values from index.json during extraction.
+        // See GitHub issue #4095.
+        std::vector<std::string> url_specs;
+        std::vector<std::string> regular_specs;
+
+        for (const auto& spec : specs)
+        {
+            // Check both the spec directly and after stripping any hash suffix
+            // (e.g., "pkg.conda#sha256:..." or "pkg.tar.bz2#md5hash")
+            std::string_view spec_view = spec;
+            if (const auto idx = spec_view.rfind('#'); idx != std::string_view::npos)
+            {
+                spec_view = spec_view.substr(0, idx);
+            }
+
+            if (specs::has_archive_extension(spec_view))
+            {
+                url_specs.push_back(spec);
+            }
+            else
+            {
+                regular_specs.push_back(spec);
+            }
+        }
+
+        // Process URL specs via explicit install path (uses from_url() for correct
+        // defaulted_keys)
+        if (!url_specs.empty())
+        {
+            install_explicit_specs(ctx, channel_context, url_specs, create_env, remove_prefix_on_failure);
+            // After explicit install, don't create env again
+            create_env = false;
+        }
+
+        // Process remaining specs via solver path
+        if (!regular_specs.empty())
+        {
+            auto is_retry = false;
+            return install_specs_impl(
+                ctx,
+                channel_context,
+                config,
+                regular_specs,
+                create_env,
+                remove_prefix_on_failure,
+                is_retry
+            );
+        }
     }
 
     namespace
