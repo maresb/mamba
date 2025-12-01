@@ -439,17 +439,38 @@ namespace mamba
 
         nlohmann::json repodata_record = m_package_info;
 
-        // For explicit spec files (URLs), m_package_info has empty depends/constrains arrays
-        // that would overwrite the correct values from index.json. Remove these empty fields.
-        if (auto depends_it = repodata_record.find("depends");
-            depends_it != repodata_record.end() && depends_it->empty())
+        // Handle metadata for new extractions (both current and healing from v2.1.1-v2.3.3).
+        //
+        // Metadata handling logic:
+        // - URL-derived packages (current): defaulted_keys populated by from_url()
+        //   → Erase those keys, allowing index.json to provide correct values
+        //
+        // - Packages with stub signature (from v2.1.1-v2.3.3): defaulted_keys empty but
+        //   has timestamp==0 AND license=="" (the stub signature)
+        //   → Treat stub fields as defaulted, allowing index.json to replace them
+        //   → This handles both NEW extractions AND re-extractions during healing
+        //
+        // - Channel packages: defaulted_keys empty + real metadata (no stub signature)
+        //   → No fields erased, values from solver/repodata preserved correctly
+        //
+        // NOTE: Corrupted caches from v2.1.1-v2.3.3 are automatically healed by
+        // has_valid_extracted_dir() detecting corruption and invalidating the cache,
+        // triggering re-extraction. See issue #4095.
+        auto defaulted_keys = m_package_info.defaulted_keys;
+        if (defaulted_keys.empty() && repodata_record.contains("timestamp")
+            && repodata_record["timestamp"] == 0 && repodata_record.contains("license")
+            && repodata_record["license"] == "")
         {
-            repodata_record.erase("depends");
+            // Stub signature detected - mark stub fields as defaulted
+            defaulted_keys = { "build_number",   "license", "timestamp",
+                               "track_features", "depends", "constrains" };
         }
-        if (auto constrains_it = repodata_record.find("constrains");
-            constrains_it != repodata_record.end() && constrains_it->empty())
+
+        // Erase fields that were defaulted or have stub values
+        // This allows index.json to provide the correct values
+        for (const auto& key : defaulted_keys)
         {
-            repodata_record.erase("constrains");
+            repodata_record.erase(key);
         }
 
         // To take correction of packages metadata (e.g. made using repodata patches) into account,
