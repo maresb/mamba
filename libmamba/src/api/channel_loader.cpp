@@ -4,6 +4,8 @@
 //
 // The full license is in the file LICENSE, distributed with this software.
 
+#include <optional>
+
 #include "mamba/api/channel_loader.hpp"
 #include "mamba/core/channel_context.hpp"
 #include "mamba/core/download_progress_bar.hpp"
@@ -24,17 +26,18 @@ namespace mamba
             ChannelContext& channel_context,
             solver::libsolv::Database& database,
             const fs::u8path& pkgs_dir
-        ) -> solver::libsolv::RepoInfo
+        ) -> std::optional<solver::libsolv::RepoInfo>
         {
             if (!fs::exists(pkgs_dir))
             {
-                // TODO : us tl::expected mechanism
-                throw std::runtime_error("Specified pkgs_dir does not exist\n");
+                LOG_DEBUG << "Skipping non-existent pkgs_dir: " << pkgs_dir.string();
+                return std::nullopt;
             }
             auto sprefix_data = PrefixData::create(pkgs_dir, channel_context);
             if (!sprefix_data)
             {
-                throw std::runtime_error("Specified pkgs_dir does not exist\n");
+                LOG_DEBUG << "Could not create prefix data for pkgs_dir: " << pkgs_dir.string();
+                return std::nullopt;
             }
             PrefixData& prefix_data = sprefix_data.value();
             for (const auto& entry : fs::directory_iterator(pkgs_dir))
