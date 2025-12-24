@@ -150,6 +150,29 @@ construct(Configuration& config, const fs::u8path& prefix, bool extract_conda_pk
 
             if (!repodata_record.is_null())
             {
+                // Erase all keys that were defaulted (stub values from URL parsing)
+                // This ensures correct metadata from index.json is used instead of stub values
+                for (const auto& key : pkg_info.defaulted_keys)
+                {
+                    repodata_record.erase(key);
+                }
+
+                // Cache healing: detect corrupted entries from buggy versions (v2.1.1-v2.3.2)
+                // If timestamp is 0 and defaulted_keys is empty, this is likely a corrupted cache
+                // entry
+                if (pkg_info.defaulted_keys.empty() && repodata_record.contains("timestamp")
+                    && repodata_record["timestamp"] == 0)
+                {
+                    // Heal by treating common stub fields as defaulted
+                    const std::vector<std::string> stub_fields = { "build_number", "license",
+                                                                   "timestamp",    "track_features",
+                                                                   "depends",      "constrains" };
+                    for (const auto& key : stub_fields)
+                    {
+                        repodata_record.erase(key);
+                    }
+                }
+
                 // update values from index if there are any that are not part of the
                 // repodata_record.json yet
                 repodata_record.insert(index.cbegin(), index.cend());
