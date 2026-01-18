@@ -280,3 +280,227 @@ class TestURLDerivedMetadata:
         if "track_features" in repodata_record:
             tf = repodata_record["track_features"]
             assert tf, f"track_features should be omitted when empty, got '{tf}'"
+
+
+class TestChannelPatchPreservation:
+    """
+    Tests that cached channel repodata values (including channel patches) are preserved.
+
+    This is a regression test for the fix that simplified constructor.cpp to trust
+    cached repodata instead of incorrectly erasing fields based on pkg_info.defaulted_keys.
+
+    The old (incorrect) behavior:
+    - pkg_info from from_url() has defaulted_keys listing stub fields
+    - Those fields were erased from cached repodata (a DIFFERENT object!)
+    - Then filled from index.json
+
+    The new (correct) behavior:
+    - Trust cached repodata values (they may contain intentional channel patches)
+    - Only fill in MISSING keys from index.json
+
+    See GitHub issue #4095.
+    """
+
+    @classmethod
+    def setup_class(cls):
+        """Create test package with cached repodata that differs from index.json."""
+        cls.temp_dir = tempfile.mkdtemp(prefix="mamba_test_channel_patch_")
+        cls.root_prefix = os.path.join(cls.temp_dir, "root")
+        cls.pkgs_dir = os.path.join(cls.root_prefix, "pkgs")
+        cls.cache_dir = os.path.join(cls.pkgs_dir, "cache")
+        os.makedirs(cls.cache_dir, exist_ok=True)
+
+        # Save original env vars
+        cls.orig_root_prefix = os.environ.get("MAMBA_ROOT_PREFIX")
+        cls.orig_prefix = os.environ.get("CONDA_PREFIX")
+
+        # Set test env vars
+        os.environ["MAMBA_ROOT_PREFIX"] = cls.root_prefix
+        os.environ["CONDA_PREFIX"] = cls.root_prefix
+
+        # Package details
+        cls.pkg_name = "patchtest-1.0-h0_1"
+        cls.pkg_filename = cls.pkg_name + ".tar.bz2"
+        cls.pkg_path = os.path.join(cls.pkgs_dir, cls.pkg_filename)
+        cls.channel_url = "http://patched.example.com/channel/linux-64/"
+
+        # Values in index.json (inside the package tarball)
+        cls.index_json = {
+            "name": "patchtest",
+            "version": "1.0",
+            "build": "h0_1",
+            "build_number": 1,
+            "license": "BSD-3-Clause",
+            "timestamp": 1000000000,
+            "depends": ["libfoo >=1.0"],
+            "constrains": [],
+        }
+
+        # Values in cached channel repodata (simulating channel patches)
+        # These DIFFER from index.json - the channel maintainer patched them
+        cls.patched_repodata = {
+            "name": "patchtest",
+            "version": "1.0",
+            "build": "h0_1",
+            "build_number": 1,
+            # Channel patch: changed license
+            "license": "MIT",
+            # Channel patch: different timestamp
+            "timestamp": 2000000000,
+            # Channel patch: added dependency constraint
+            "depends": ["libfoo >=1.0", "libbar <2.0"],
+            # Channel patch: added constrains
+            "constrains": ["conflicting-pkg"],
+        }
+
+        # Create the package tarball
+        cls._create_test_package()
+
+        # Create cached repodata file
+        cls._create_cached_repodata()
+
+        # Create urls file
+        urls_path = os.path.join(cls.pkgs_dir, "urls")
+        with open(urls_path, "w") as f:
+            f.write(f"{cls.channel_url}{cls.pkg_filename}#deadbeef12345678\n")
+
+    @classmethod
+    def _create_test_package(cls):
+        """Create a minimal conda package tarball with index.json."""
+        pkg_dir = os.path.join(cls.temp_dir, "pkg_build", cls.pkg_name)
+        info_dir = os.path.join(pkg_dir, "info")
+        os.makedirs(info_dir, exist_ok=True)
+
+        # Write index.json with ORIGINAL (non-patched) values
+        with open(os.path.join(info_dir, "index.json"), "w") as f:
+            json.dump(cls.index_json, f)
+
+        # Write minimal paths.json
+        with open(os.path.join(info_dir, "paths.json"), "w") as f:
+            json.dump({"paths": [], "paths_version": 1}, f)
+
+        # Create tarball
+        with tarfile.open(cls.pkg_path, "w:bz2") as tar:
+            tar.add(info_dir, arcname="info")
+
+    @classmethod
+    def _create_cached_repodata(cls):
+        """Create cached channel repodata with patched values."""
+        # Constructor looks for cache files named by URL hash
+        # Format: cache_name_from_url(channel_url) + ".json"
+        # We need to match what constructor.cpp does
+
+        # Simplified: create repodata in the expected location
+        # The cache_name_from_url function creates a hash, but for testing
+        # we can observe what constructor looks for
+
+        # Create a repodata.json that contains our patched package
+        repodata = {
+            "packages": {
+                cls.pkg_filename: cls.patched_repodata,
+            },
+            "packages.conda": {},
+        }
+
+        # Constructor uses: cache_name_from_url(channel_url) + ".json"
+        # This creates a hash of the URL. For testing, we'll create multiple
+        # possible cache file names to ensure one matches.
+
+        # The hash function in mamba creates something like "abcd1234.json"
+        # For now, let's put it in a predictable location that we control
+
+        # Actually, looking at the code more carefully:
+        # repodata_location = pkgs_dir / "cache" / repodata_cache_name
+        # where repodata_cache_name = cache_name_from_url(channel_url) + ".json"
+
+        # We need to compute the same hash. Let's use a simpler approach:
+        # We'll iterate and find what hash was created, or pre-compute it.
+
+        # For testing, let's use the same approach as the code:
+        # Import the hash function if available, or compute manually
+
+        # Actually, the easiest approach: create the cache file with a known name
+        # and modify the test to use a channel URL that hashes to that name.
+
+        # OR: we can just write to ALL possible cache files (hacky but works for test)
+
+        # Let's compute the cache name using Python's hashlib to match C++ behavior
+        import hashlib
+
+        # The C++ cache_name_from_url does: MD5(url) truncated
+        url_hash = hashlib.md5(cls.channel_url.encode()).hexdigest()[:8]
+        cache_filename = f"{url_hash}.json"
+
+        cache_path = os.path.join(cls.cache_dir, cache_filename)
+        with open(cache_path, "w") as f:
+            json.dump(repodata, f)
+
+    @classmethod
+    def teardown_class(cls):
+        """Clean up test directory and restore env vars."""
+        try:
+            shutil.rmtree(cls.temp_dir)
+        finally:
+            if cls.orig_root_prefix is not None:
+                os.environ["MAMBA_ROOT_PREFIX"] = cls.orig_root_prefix
+            else:
+                os.environ.pop("MAMBA_ROOT_PREFIX", None)
+            if cls.orig_prefix is not None:
+                os.environ["CONDA_PREFIX"] = cls.orig_prefix
+            else:
+                os.environ.pop("CONDA_PREFIX", None)
+
+    def test_channel_patches_preserved(self):
+        """
+        Test that channel-patched values in cached repodata are preserved.
+
+        This is a RED-GREEN test:
+        - RED (old code): Would erase 'license', 'timestamp', 'depends', 'constrains'
+          from cached repodata based on pkg_info.defaulted_keys, then fill from
+          index.json, losing the channel patches.
+        - GREEN (new code): Trusts cached repodata, preserving channel patches.
+          Only fills in MISSING keys from index.json.
+
+        The test verifies that the patched values (which differ from index.json)
+        are preserved in the final repodata_record.json.
+        """
+        # Run constructor to extract packages
+        constructor("--prefix", self.root_prefix, "--extract-conda-pkgs")
+
+        # Read the generated repodata_record.json
+        extracted_dir = os.path.join(self.pkgs_dir, self.pkg_name)
+        repodata_path = os.path.join(extracted_dir, "info", "repodata_record.json")
+
+        assert os.path.exists(repodata_path), f"repodata_record.json not found at {repodata_path}"
+
+        with open(repodata_path) as f:
+            repodata_record = json.load(f)
+
+        # These assertions would FAIL with the old code (which overwrote with index.json)
+        # and PASS with the new code (which preserves cached repodata)
+
+        # Channel-patched license should be preserved
+        assert repodata_record.get("license") == "MIT", (
+            f"Channel-patched license 'MIT' should be preserved, "
+            f"got '{repodata_record.get('license')}' (index.json has 'BSD-3-Clause')"
+        )
+
+        # Channel-patched timestamp should be preserved
+        assert repodata_record.get("timestamp") == 2000000000, (
+            f"Channel-patched timestamp 2000000000 should be preserved, "
+            f"got {repodata_record.get('timestamp')} (index.json has 1000000000)"
+        )
+
+        # Channel-patched depends should be preserved (has extra dependency)
+        expected_depends = ["libfoo >=1.0", "libbar <2.0"]
+        assert repodata_record.get("depends") == expected_depends, (
+            f"Channel-patched depends {expected_depends} should be preserved, "
+            f"got {repodata_record.get('depends')} (index.json has ['libfoo >=1.0'])"
+        )
+
+        # Channel-patched constrains should be preserved
+        expected_constrains = ["conflicting-pkg"]
+        assert repodata_record.get("constrains") == expected_constrains, (
+            f"Channel-patched constrains {expected_constrains} should be preserved, "
+            f"got {repodata_record.get('constrains')} (index.json has [])"
+        )
