@@ -339,6 +339,68 @@ namespace mamba
             );
         }
 
+        /**
+         * EXPECTED FAILURE: Conda lockfile dependencies should NOT be in defaulted_keys
+         *
+         * PURPOSE: Verify that when the conda lockfile provides dependencies,
+         * "depends" is NOT listed in defaulted_keys (since it's no longer a stub).
+         *
+         * MOTIVATION: The conda lockfile parser (env_lockfile_conda.cpp):
+         * 1. Calls from_url() → defaulted_keys includes "depends" and "constrains"
+         * 2. Copies defaulted_keys from from_url() result (line 79)
+         * 3. Populates dependencies from lockfile data (lines 82-89)
+         * 4. Populates constrains from lockfile data (lines 91-99)
+         *
+         * After step 3/4, "depends" and "constrains" have real values from the
+         * lockfile, not stubs. But defaulted_keys still lists them as defaulted.
+         * This causes write_repodata_record() to erase the lockfile-provided
+         * values and replace them with index.json values.
+         *
+         * CURRENT BEHAVIOR (BUG): "depends" and "constrains" are in defaulted_keys
+         * even though the lockfile explicitly provides them.
+         *
+         * EXPECTED BEHAVIOR: If the lockfile provides dependencies/constrains,
+         * they should be removed from defaulted_keys (or defaulted_keys should
+         * not include them in the first place).
+         *
+         * Related: https://github.com/mamba-org/mamba/issues/4095
+         */
+        TEST_CASE("env-lockfile conda lockfile dependencies not in defaulted_keys")
+        {
+            auto contains = [](const std::vector<std::string>& v, const std::string& val) -> bool
+            { return std::find(v.begin(), v.end(), val) != v.end(); };
+
+            // The good_one_package-lock.yaml lockfile has a package with dependencies:
+            //   vc: ">=14.1,<15.0a0"
+            //   vs2015_runtime: ">=14.16.27012"
+            const fs::u8path lockfile_path = mambatests::test_data_dir
+                                             / "env_lockfile/good_one_package-lock.yaml";
+
+            const auto maybe_lockfile = read_environment_lockfile(lockfile_path);
+            REQUIRE(maybe_lockfile);
+
+            const auto lockfile = maybe_lockfile.value();
+            const auto packages = lockfile.get_all_packages();
+            REQUIRE_FALSE(packages.empty());
+
+            for (const auto& pkg : packages)
+            {
+                INFO("Package: " << pkg.info.name);
+
+                // _initialized must be present
+                REQUIRE(contains(pkg.info.defaulted_keys, "_initialized"));
+
+                // If the lockfile provides dependencies, "depends" should NOT be
+                // in defaulted_keys (it's no longer a stub value).
+                if (!pkg.info.dependencies.empty())
+                {
+                    // BUG: Current code copies defaulted_keys from from_url(), which
+                    // includes "depends", even though the lockfile provided real values.
+                    CHECK_FALSE(contains(pkg.info.defaulted_keys, "depends"));
+                }
+            }
+        }
+
         TEST_CASE("env-lockfile create_transaction_with_categories")
         {
             // NOTE: at the moment of writing this test,
