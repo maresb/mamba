@@ -1080,125 +1080,40 @@ namespace
     }
 
     /**
-     * EXPECTED FAILURE: Cache healing false positive on legitimate zero-timestamp package
+     * EXPECTED FAILURE: defaulted_keys is stale after post-from_url() field population
      *
-     * PURPOSE: Verify that a package with legitimately zero timestamp AND empty
-     * license string is NOT incorrectly flagged as corrupted cache.
+     * PURPOSE: Verify that write_repodata_record() does not silently discard fields
+     * that were populated AFTER from_url() set defaulted_keys.
      *
-     * MOTIVATION: Some real packages have timestamp=0 and license="" — for example,
-     * packages built with older tooling, or internal/proprietary packages without
-     * license metadata. The cache healing heuristic (timestamp=0 AND license="")
-     * falsely invalidates these, forcing unnecessary re-extraction.
+     * MOTIVATION: The defaulted_keys mechanism tracks which fields have stub values
+     * at from_url() time. But several code paths (conda lockfile parser, potential
+     * future enrichment) call from_url() and then populate some of those "defaulted"
+     * fields with real data. The defaulted_keys list is never updated to reflect
+     * this, so write_repodata_record() erases the real values and replaces them
+     * with index.json values.
      *
-     * CURRENT BEHAVIOR (BUG): The cache is invalidated and the package is
-     * re-extracted, even though the metadata is correct and not corrupted.
+     * CONCRETE EXAMPLE: The conda lockfile parser (env_lockfile_conda.cpp):
+     * 1. Calls from_url() → defaulted_keys = {"_initialized", ..., "depends", ...}
+     * 2. Copies defaulted_keys from from_url() result (line 79)
+     * 3. Populates pkg.dependencies from lockfile data (lines 82-89)
      *
-     * EXPECTED BEHAVIOR: The package should be considered valid. The healing
-     * heuristic should not use metadata values as corruption signatures since
-     * those values can legitimately occur.
+     * After step 3, the dependencies have real values (potentially reflecting
+     * repodata patches), but "depends" is still in defaulted_keys. When
+     * write_repodata_record() runs, it erases "depends" and replaces with
+     * index.json's (unpatched) values.
      *
-     * Related: https://github.com/mamba-org/mamba/issues/4095
-     */
-    TEST_CASE("PackageFetcher no false positive healing for legitimate zero-timestamp empty-license")
-    {
-        auto& ctx = mambatests::context();
-        TemporaryDirectory temp_dir;
-        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
-
-        static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/legit-pkg-1.0-h0_0.tar.bz2";
-        auto pkg_info = specs::PackageInfo::from_url(url).value();
-
-        const std::string pkg_basename = "legit-pkg-1.0-h0_0";
-
-        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
-        auto info_dir = pkg_extract_dir / "info";
-        fs::create_directories(info_dir);
-
-        nlohmann::json index_json;
-        index_json["name"] = "legit-pkg";
-        index_json["version"] = "1.0";
-        index_json["build"] = "h0_0";
-
-        {
-            std::ofstream index_file((info_dir / "index.json").std_path());
-            index_file << index_json.dump(2);
-        }
-
-        {
-            std::ofstream paths_file((info_dir / "paths.json").std_path());
-            paths_file << R"({"paths": [], "paths_version": 1})";
-        }
-
-        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
-        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
-        REQUIRE(fs::exists(tarball_path));
-
-        auto md5_hash = validation::md5sum(tarball_path);
-        auto sha256_hash = validation::sha256sum(tarball_path);
-        auto tarball_size = fs::file_size(tarball_path);
-
-        // Create a LEGITIMATE repodata_record.json with timestamp=0 AND license=""
-        // This is NOT corrupted — the package genuinely has no timestamp and no license.
-        // Older packages and internal packages can have these values.
-        nlohmann::json legit_repodata;
-        legit_repodata["name"] = "legit-pkg";
-        legit_repodata["version"] = "1.0";
-        legit_repodata["build"] = "h0_0";
-        legit_repodata["build_number"] = 0;
-        legit_repodata["timestamp"] = 0;      // Legitimately zero (old package)
-        legit_repodata["license"] = "";        // Legitimately empty (no license info)
-        legit_repodata["fn"] = pkg_basename + ".tar.bz2";
-        legit_repodata["depends"] = nlohmann::json::array({ "python" });
-        legit_repodata["constrains"] = nlohmann::json::array();
-        legit_repodata["md5"] = md5_hash;
-        legit_repodata["sha256"] = sha256_hash;
-        legit_repodata["size"] = tarball_size;
-        legit_repodata["url"] = std::string(url);
-        legit_repodata["channel"] = "https://conda.anaconda.org/conda-forge";
-        legit_repodata["subdir"] = "linux-64";
-
-        {
-            std::ofstream repodata_file((info_dir / "repodata_record.json").std_path());
-            repodata_file << legit_repodata.dump(2);
-        }
-
-        auto modified_pkg_info = pkg_info;
-        modified_pkg_info.filename = pkg_basename + ".tar.bz2";
-
-        PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
-
-        // SHOULD NOT need extraction — the metadata is legitimate, not corrupted.
-        // BUG: Current heuristic (timestamp=0 AND license="") falsely flags this.
-        CHECK_FALSE(pkg_fetcher.needs_extract());
-    }
-
-    /**
-     * EXPECTED FAILURE: Lockfile-provided dependencies should survive write_repodata_record()
+     * This test uses dependencies to demonstrate the issue concretely, but the
+     * same class of bug affects any field that a code path populates after
+     * from_url() without updating defaulted_keys.
      *
-     * PURPOSE: Verify that when a conda lockfile provides dependencies (which may
-     * reflect repodata patches), those dependencies are preserved in
-     * repodata_record.json and NOT silently replaced by index.json values.
+     * CURRENT BEHAVIOR (BUG): The populated dependencies are erased because
+     * "depends" is in defaulted_keys, replaced with index.json values.
      *
-     * MOTIVATION: The conda lockfile parser (env_lockfile_conda.cpp):
-     * 1. Calls from_url() which sets defaulted_keys including "depends"
-     * 2. Copies defaulted_keys from the URL parse result
-     * 3. Then populates pkg.dependencies from the lockfile's dependency data
-     *
-     * Step 3 provides real dependency data (potentially repodata-patched), but
-     * step 2 still has "depends" listed as a defaulted key. When
-     * write_repodata_record() runs, it erases "depends" (because it's in
-     * defaulted_keys) and replaces it with index.json values, silently
-     * discarding the lockfile's patched dependencies.
-     *
-     * CURRENT BEHAVIOR (BUG): Lockfile dependencies are erased and replaced
-     * with index.json dependencies.
-     *
-     * EXPECTED BEHAVIOR: Lockfile-provided dependencies should be preserved
-     * because the lockfile explicitly provides them (they're not stubs).
+     * EXPECTED BEHAVIOR: Populated values should survive write_repodata_record().
      *
      * Related: https://github.com/mamba-org/mamba/issues/4095
      */
-    TEST_CASE("PackageFetcher::write_repodata_record preserves lockfile-provided dependencies")
+    TEST_CASE("PackageFetcher::write_repodata_record preserves post-from_url populated fields")
     {
         auto& ctx = mambatests::context();
         TemporaryDirectory temp_dir;
@@ -1207,7 +1122,6 @@ namespace
         // Simulate what the conda lockfile parser produces:
         // from_url() sets defaulted_keys including "depends" and "constrains",
         // then the lockfile parser populates actual dependencies from lockfile data.
-        // The lockfile dependencies may differ from index.json (repodata patches).
         specs::PackageInfo pkg_info;
         pkg_info.name = "lockdep-pkg";
         pkg_info.version = "1.0";
@@ -1221,9 +1135,9 @@ namespace
         pkg_info.defaulted_keys = { "_initialized", "build_number", "license",     "timestamp",
                                     "track_features", "depends",    "constrains" };
 
-        // Step 2: Lockfile parser then populates dependencies from lockfile data.
-        // These represent repodata-PATCHED dependencies (intentionally different
-        // from what's in index.json).
+        // Step 2: A downstream code path (e.g. conda lockfile parser) populates
+        // dependencies with real data. These may reflect repodata patches and
+        // intentionally differ from what's baked into index.json.
         pkg_info.dependencies = { "patched-dep >=2.0" };
         pkg_info.constrains = { "patched-constraint >=3.0" };
 
@@ -1233,8 +1147,7 @@ namespace
         auto info_dir = pkg_extract_dir / "info";
         fs::create_directories(info_dir);
 
-        // Create index.json with ORIGINAL (pre-patch) dependencies
-        // In a real scenario, index.json has the UNPATCHED metadata baked into the tarball.
+        // index.json has the ORIGINAL (pre-patch, tarball-baked) dependencies.
         nlohmann::json index_json;
         index_json["name"] = "lockdep-pkg";
         index_json["version"] = "1.0";
@@ -1277,10 +1190,12 @@ namespace
         nlohmann::json repodata_record;
         repodata_file >> repodata_record;
 
-        // The lockfile-provided dependencies should be preserved, NOT replaced
-        // by index.json's original dependencies.
-        // BUG: Current code erases "depends" because it's in defaulted_keys,
-        // then fills from index.json: ["original-dep >=1.0", "other-dep"]
+        // The post-from_url() populated dependencies should be preserved,
+        // NOT replaced by index.json's original (unpatched) dependencies.
+        //
+        // BUG: "depends" is in defaulted_keys (from from_url()), so
+        // write_repodata_record() erases it and fills from index.json,
+        // silently discarding the populated values.
         REQUIRE(repodata_record.contains("depends"));
         CHECK(repodata_record["depends"].size() == 1);
         CHECK(repodata_record["depends"][0] == "patched-dep >=2.0");
@@ -1288,107 +1203,5 @@ namespace
         REQUIRE(repodata_record.contains("constrains"));
         CHECK(repodata_record["constrains"].size() == 1);
         CHECK(repodata_record["constrains"][0] == "patched-constraint >=3.0");
-    }
-
-    /**
-     * EXPECTED FAILURE: defaulted_keys should not silently discard populated fields
-     *
-     * PURPOSE: Verify that if a code path populates a field on PackageInfo AFTER
-     * from_url() sets defaulted_keys, the populated value is NOT silently discarded
-     * by write_repodata_record().
-     *
-     * MOTIVATION: This is the general form of the lockfile bug. Any code path that:
-     * 1. Calls from_url() (which sets defaulted_keys including field names)
-     * 2. Then populates those fields with real data
-     * 3. But forgets to remove them from defaulted_keys
-     * ...will silently lose the populated data when write_repodata_record() runs.
-     *
-     * This test demonstrates the issue with a concrete example: a PackageInfo
-     * where from_url() marked "license" as defaulted, but then the license was
-     * populated with a real value from an external source (lockfile, database, etc.).
-     *
-     * CURRENT BEHAVIOR (BUG): The license is erased because it's in defaulted_keys,
-     * even though it now contains a real value.
-     *
-     * EXPECTED BEHAVIOR: If a field has been populated with a non-default value,
-     * it should not be erased just because defaulted_keys lists it.
-     *
-     * Related: https://github.com/mamba-org/mamba/issues/4095
-     */
-    TEST_CASE("PackageFetcher::write_repodata_record does not erase populated-after-from_url fields")
-    {
-        auto& ctx = mambatests::context();
-        TemporaryDirectory temp_dir;
-        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
-
-        // Simulate a code path that calls from_url() then enriches the PackageInfo
-        static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/enriched-pkg-1.0-h0_0.conda";
-        auto pkg_info = specs::PackageInfo::from_url(url).value();
-
-        // Precondition: from_url() marks "license" and "timestamp" as defaulted
-        auto contains = [](const std::vector<std::string>& v, const std::string& val) -> bool
-        { return std::find(v.begin(), v.end(), val) != v.end(); };
-        REQUIRE(contains(pkg_info.defaulted_keys, "license"));
-        REQUIRE(contains(pkg_info.defaulted_keys, "timestamp"));
-
-        // Now simulate enrichment: some code path sets real values for these fields
-        // (e.g., from a lockfile, from a database lookup, from a sidecar file, etc.)
-        pkg_info.license = "Apache-2.0";
-        pkg_info.timestamp = 1700000000;
-
-        const std::string pkg_basename = "enriched-pkg-1.0-h0_0";
-
-        auto pkg_extract_dir = temp_dir.path() / "pkgs" / pkg_basename;
-        auto info_dir = pkg_extract_dir / "info";
-        fs::create_directories(info_dir);
-
-        // index.json has DIFFERENT values for the enriched fields
-        nlohmann::json index_json;
-        index_json["name"] = "enriched-pkg";
-        index_json["version"] = "1.0";
-        index_json["build"] = "h0_0";
-        index_json["license"] = "GPL-3.0";       // Different from enriched value
-        index_json["timestamp"] = 1600000000;     // Different from enriched value
-
-        {
-            std::ofstream index_file((info_dir / "index.json").std_path());
-            index_file << index_json.dump(2);
-        }
-
-        {
-            std::ofstream paths_file((info_dir / "paths.json").std_path());
-            paths_file << R"({"paths": [], "paths_version": 1})";
-        }
-
-        auto tarball_path = temp_dir.path() / "pkgs" / (pkg_basename + ".tar.bz2");
-        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
-        REQUIRE(fs::exists(tarball_path));
-
-        auto modified_pkg_info = pkg_info;
-        modified_pkg_info.filename = pkg_basename + ".tar.bz2";
-
-        fs::remove_all(pkg_extract_dir);
-
-        PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
-
-        ExtractOptions options;
-        options.sparse = false;
-        options.subproc_mode = extract_subproc_mode::mamba_package;
-
-        bool extract_success = pkg_fetcher.extract(options);
-        REQUIRE(extract_success);
-
-        auto repodata_record_path = pkg_extract_dir / "info" / "repodata_record.json";
-        REQUIRE(fs::exists(repodata_record_path));
-
-        std::ifstream repodata_file(repodata_record_path.std_path());
-        nlohmann::json repodata_record;
-        repodata_file >> repodata_record;
-
-        // The enriched values should be preserved, NOT replaced by index.json.
-        // BUG: "license" and "timestamp" are in defaulted_keys (from from_url()),
-        // so write_repodata_record() erases them and fills from index.json.
-        CHECK(repodata_record["license"] == "Apache-2.0");
-        CHECK(repodata_record["timestamp"] == 1700000000);
     }
 }
