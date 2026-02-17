@@ -2,41 +2,55 @@
 
 ## Executive Summary
 
-The PR addresses a real and well-defined bug (issue #4095), but the implementation
-has grown into a complex multi-tentacled change touching 19 files across 5 subsystems.
-The core problem can be distilled to **3 precise principles**, and most of the PR's
-complexity comes from propagating a single mechanism (`defaulted_keys`) through
-every code path rather than addressing the root cause at the single point where
-the merge actually happens.
+PR #4110 fixes issue #4095: incorrect `repodata_record.json` metadata for
+explicit installs. The core mechanism (`defaulted_keys` for per-field trust
+tracking) is sound and necessary. However, the implementation has a bug in the
+conda lockfile path and some minor issues worth addressing. This document
+distills the comprehensive principles behind the changes and catalogs the
+findings.
 
 ---
 
-## The 3 Fundamental Principles of Metadata Integrity
+## The Principles of Metadata Integrity
 
-### Principle 1: Provenance Determines Trust
+### Principle 1: Provenance Determines Per-Field Trust
 
-A `PackageInfo` object's field reliability depends entirely on **where it came from**:
+A `PackageInfo` object's field reliability depends on **where it came from**,
+and trust is **per-field**, not per-object:
 
 | Provenance | Trustworthy Fields | Stub/Default Fields |
 |---|---|---|
 | **Channel repodata** (solver) | ALL fields (including repodata patches) | None |
-| **URL string** (`from_url()`) | name, version, build_string, channel, subdir, filename, md5/sha256 (if in URL) | build_number, license, timestamp, track_features, depends, constrains |
-| **Lockfile** (conda format) | name, version, build, channel, platform, md5/sha256, url | build_number, license, timestamp, track_features |
-| **Lockfile** (mambajs format) | name, version, build, channel, subdir, hash | build_number, license, timestamp, track_features, depends, constrains |
-| **History entry** | name, version, build, channel | Everything else |
+| **URL string** (`from_url()`) | name, version, build_string, channel, subdir, filename, md5/sha256 (if in URL hash) | build_number, license, timestamp, track_features, depends, constrains |
+| **Conda lockfile** (trusted, sha256 present) | name, version, build, channel, platform, md5/sha256, url, **depends**, **constrains** | build_number, license, timestamp, track_features |
+| **Conda lockfile** (untrusted, sha256 absent) | name, version, build, channel, platform, md5, url | build_number, license, timestamp, track_features, depends, constrains |
+| **Mambajs lockfile** | name, version, build, channel, subdir, hash | build_number, license, timestamp, track_features, depends, constrains |
+| **History entry** | *(never reaches `write_repodata_record()`)* | N/A |
+
+The per-field nature of trust is critical. A lockfile with sha256 provides
+trustworthy `depends` but still has stub values for `license` and `timestamp`.
+No coarse-grained provenance enum can express this; per-field tracking is
+required.
 
 ### Principle 2: The Merge Rule for `repodata_record.json`
 
 When writing `repodata_record.json`, two data sources are merged:
-1. **The `PackageInfo`** (from solver or URL)
+1. **The `PackageInfo`** (from solver, URL, or lockfile)
 2. **The `index.json`** (from inside the extracted tarball)
 
-The merge rule is:
-- **Channel-repodata-derived packages**: `PackageInfo` fields take precedence over
-  `index.json`. Use `insert()` (only add missing keys). This preserves repodata
-  patches, including intentionally empty `depends`/`constrains`.
-- **URL-derived packages**: `index.json` fields take precedence over `PackageInfo`
-  stub fields. Erase stub fields first, then `insert()` from both sources.
+The merge rule depends on per-field trust:
+- **Trusted fields** (not in `defaulted_keys`): `PackageInfo` value takes
+  precedence. `index.json` only fills in keys not already present.
+- **Stub fields** (listed in `defaulted_keys`): Erased before merge, so
+  `index.json` provides the correct values.
+
+This is implemented as:
+1. `repodata_record = to_json(PackageInfo)` — full serialization
+2. Erase fields listed in `defaulted_keys` (except `_initialized`)
+3. `insert()` from `index.json` — only adds missing keys
+
+This preserves channel patches (solver-derived packages have no stub fields)
+while correctly backfilling URL-derived stubs from `index.json`.
 
 ### Principle 3: Normalization at the Write Boundary
 
@@ -46,293 +60,177 @@ Regardless of provenance, the final `repodata_record.json` should satisfy:
 - `md5` and `sha256` are always present (computed from tarball if needed)
 - `size` is always present (computed from tarball if needed)
 
+This normalization is applied in two separate code paths:
+- `PackageFetcher::write_repodata_record()` in `package_fetcher.cpp`
+- `construct()` in `micromamba/src/constructor.cpp`
+
+### Principle 4: Trust Indicators for External Metadata
+
+When metadata comes from external sources (lockfiles), its trustworthiness
+must be assessed before deciding per-field trust:
+
+- **sha256 present in lockfile entry**: Metadata is trustworthy. Dependencies
+  and constrains provided by the lockfile should be trusted (removed from
+  `defaulted_keys`), since they may reflect repodata patches.
+- **sha256 absent**: Metadata may have been generated during the v2.1.1-v2.4.0
+  bug period using corrupted `repodata_record.json`. Dependencies should be
+  treated as untrusted (kept in `defaulted_keys`), allowing `index.json` to
+  provide correct values.
+
+### Principle 5: Cache Healing for Legacy Corruption
+
+Caches written by v2.1.1-v2.4.0 may contain corrupted `repodata_record.json`
+files. The corruption signature (`timestamp == 0 AND license == ""`) is used
+to detect and invalidate these entries, triggering re-extraction. The false
+positive risk is acceptable: no modern build system should produce packages
+with both fields at their zero/empty defaults, and the only consequence of a
+false positive is unnecessary re-extraction (not data corruption).
+
+### Principle 6: Fail-Hard on Uninitialized Provenance
+
+Every `PackageInfo` that reaches `write_repodata_record()` must have the
+`_initialized` sentinel in `defaulted_keys`. This proves the object was
+constructed through a proper code path (`from_url()`, `make_package_info()`,
+or a lockfile parser) that established per-field trust. If missing, a
+`std::logic_error` is thrown to catch programming bugs early.
+
 ---
 
 ## How the PR Implements These Principles
 
-The PR uses the `defaulted_keys` field on `PackageInfo` as a **per-field provenance
+The PR uses the `defaulted_keys` field on `PackageInfo` as a **per-field trust
 tracker**:
 
-- `defaulted_keys = {"_initialized"}` → channel-repodata provenance (trust all fields)
-- `defaulted_keys = {"_initialized", "field1", "field2", ...}` → URL provenance
-  (listed fields are stubs)
-- `defaulted_keys = {}` (empty) → **error** (PackageInfo not properly constructed)
+- `defaulted_keys = {"_initialized"}` — trust all fields (channel repodata)
+- `defaulted_keys = {"_initialized", "field1", "field2", ...}` — listed fields
+  are stubs to be replaced by `index.json`
+- `defaulted_keys = {}` (empty) — error: not properly constructed
 
-The `_initialized` sentinel enables a fail-hard check in `write_repodata_record()`.
+`defaulted_keys` is set at construction time and must survive the full journey
+from creation to `write_repodata_record()`:
+
+| Creation Path | Sets `defaulted_keys` | Reaches `write_repodata_record()` via |
+|---|---|---|
+| `from_url()` | URL stub fields listed | Direct → `MTransaction` → `PackageFetcher` |
+| `make_package_info()` (solver) | `{"_initialized"}` only | Solver → `MTransaction` → `PackageFetcher` |
+| Channel repodata JSON → solvable | `{"_initialized"}` set on solvable | `.solv` cache → solver → `PackageFetcher` |
+| Conda lockfile parser | Copied from `from_url()` | `MTransaction` (lockfile) → `PackageFetcher` |
+| Mambajs lockfile parser | Hardcoded stub list | `MTransaction` (lockfile) → `PackageFetcher` |
+| `from_url()` via `channel_loader.cpp` | URL stub fields listed | Solver DB → solver → `PackageFetcher` |
+| `read_history_url_entry()` | *(set but never consumed)* | Never reaches `write_repodata_record()` |
+
+For the solver round-trip, `defaulted_keys` is serialized as a comma-separated
+string in libsolv's `SOLVABLE_KEYWORDS` field and deserialized after solving.
+Old `.solv` caches without this field get the fallback `{"_initialized"}`
+(correct, since old caches came from channel repodata).
+
+The constructor path (`micromamba/src/constructor.cpp`) is separate: it reads
+cached channel repodata from `pkgs/cache/*.json` files (a third data source),
+merges with `index.json`, and overlays URL-derived fields (`fn`, `url`,
+`channel`). It never uses `defaulted_keys` because it keeps channel repodata
+and URL data as separate JSON objects.
 
 ---
 
 ## Bugs and Gaps Identified
 
-### Bug 1: Unnecessary Dead Code in `history.cpp`
+### Bug 1: Lockfile Dependencies Silently Discarded
 
-`read_history_url_entry()` sets `defaulted_keys` (commit `ebf9f138`), but
-its results are **only used for `PackageDiff` computation** (history display /
-`mamba env diff`), never for `PackageFetcher` or `write_repodata_record()`. The
-`defaulted_keys` set here is dead code that adds confusion.
+**Severity: Medium.** The conda lockfile parser (`env_lockfile_conda.cpp`):
+1. Parses sha256 from the lockfile (lines 48-51)
+2. Calls `from_url()` → `defaulted_keys` includes `"depends"`, `"constrains"`
+3. Copies `defaulted_keys` from `from_url()` result (line 79)
+4. Populates `dependencies` from lockfile data (lines 82-89)
+5. Populates `constrains` from lockfile data (lines 91-99)
 
-**Evidence**: `read_history_url_entry()` is called at lines 416 and 422 of
-`history.cpp`, storing results into `rev.removed_pkg` / `rev.installed_pkg` maps
-that feed into `PackageDiff`. These never flow into `build_fetchers()` or
-`PackageFetcher`.
+After steps 4-5, `dependencies` and `constrains` have real values from the
+lockfile, but `defaulted_keys` still lists them as stubs. When
+`write_repodata_record()` runs, it erases them and replaces with `index.json`
+values.
 
-### Bug 2: `SOLVABLE_KEYWORDS` Repurposing Risk
+For trusted lockfiles (sha256 present), the fix should remove `"depends"` and
+`"constrains"` from `defaulted_keys` after populating them. For untrusted
+lockfiles (sha256 absent), keeping them in `defaulted_keys` is correct since
+the dependency data may be corrupted.
 
-The PR stores `defaulted_keys` as a comma-separated string in libsolv's
-`SOLVABLE_KEYWORDS` field. Concerns:
+**Tests added:** `test_env_lockfile.cpp` (parsing level) and
+`test_package_fetcher.cpp` (merge level). Both currently fail.
 
-1. **Persisted in `.solv` cache files**: `repo_write()` serializes all solvable
-   attributes. New mamba writing `.solv` caches with `SOLVABLE_KEYWORDS` populated
-   will produce caches that old mamba versions might interpret differently if they
-   ever start using this field.
-2. **Comma in key names**: If any future key name contains a comma, the
-   serialization breaks (low risk but fragile).
-3. **No validation on read**: `defaulted_keys()` parses whatever string is in
-   `SOLVABLE_KEYWORDS` without checking it's actually `defaulted_keys` data vs.
-   some other use of the field.
+### Issue 2: Dead Code in `history.cpp`
 
-### Bug 3: Constructor Path Has No `_initialized` Verification
+**Severity: Low.** `read_history_url_entry()` sets `defaulted_keys` but its
+results only flow into `PackageDiff` (history display), never into
+`PackageFetcher` or `write_repodata_record()`. The `defaulted_keys` set here
+is dead code.
 
-`micromamba/src/constructor.cpp` writes `repodata_record.json` with its own
-independent code path that does NOT use `write_repodata_record()` and has no
-`_initialized` check. This path trusts whatever `repodata_record` JSON it finds
-in the cached channel data (`pkgs/cache/*.json`). If that cache is missing, it
-falls back to `index.json` — which is actually the correct behavior for that
-scenario.
+### Issue 3: `SOLVABLE_KEYWORDS` Repurposing
 
-The constructor path is mostly correct because it sources its repodata from
-cached channel data files (not from `PackageInfo` stubs). However, the
-normalization logic (depends/constrains/track_features) is **copy-pasted** from
-`package_fetcher.cpp`, creating a DRY violation.
+**Severity: Low risk.** The PR stores `defaulted_keys` in libsolv's
+`SOLVABLE_KEYWORDS` field as a comma-separated string. This field is persisted
+in `.solv` cache files. Concerns:
+- Old mamba reading new caches: harmless (field is ignored)
+- New mamba reading old caches: handled by fallback to `{"_initialized"}`
+- Comma in key names: low risk (current keys don't contain commas)
+- No validation on read: parses whatever is in the field
 
-### Gap 4: Fragile Per-Field Name Lists
+This is consistent with the existing pattern of repurposing `SOLVABLE_INSTALLSTATUS`
+for `SolvableType`.
 
-The `defaulted_keys` field name lists are hardcoded in **7 separate locations**:
+### Issue 4: Normalization Code Duplication
 
-1. `package_info.cpp` — `parse_url()` conda packages
-2. `package_info.cpp` — `parse_url()` wheel packages (2 locations)
-3. `package_info.cpp` — `parse_url()` tar.gz packages
-4. `package_info.cpp` — `from_url()` git packages
-5. `env_lockfile_mambajs.cpp`
-6. `history.cpp` (dead code, see Bug 1)
+**Severity: Low.** The depends/constrains/track_features normalization logic
+is copy-pasted between `package_fetcher.cpp` and `constructor.cpp`. These
+should share a helper function.
 
-If a new field is added to `PackageInfo` in the future, all these lists must be
-updated. If one is missed, stub values will silently leak into
-`repodata_record.json`.
+### Issue 5: Fragile Per-Field Name Lists
 
-### Gap 5: Cache Healing Heuristic False Positives
-
-The corruption detection in `package_cache.cpp` uses `timestamp == 0 AND
-license == ""` as the corruption signature. While the PR's comments acknowledge
-the low false-positive risk, there are legitimate packages where this could
-trigger unnecessarily:
-
-- Packages built with older tooling that didn't set timestamps
-- Packages with no license information (e.g., internal/proprietary)
-
-The consequence is only unnecessary re-extraction (not data corruption), but
-this could cause unexpected performance degradation in large environments with
-many such packages.
-
-### Gap 6: `defaulted_keys` in `env_lockfile_conda.cpp` Relies on `from_url()` Indirectly
-
-In `env_lockfile_conda.cpp`, `defaulted_keys` is copied from the parsed URL
-info (`maybe_parsed_info->defaulted_keys`). This works because the conda
-lockfile format stores URLs that are parsed with `from_url()`. However, if the
-lockfile URL parsing changes or additional fields are available in the lockfile
-format, this indirect coupling could break.
+**Severity: Low.** The `defaulted_keys` field name lists are hardcoded in 6
+locations (7 counting the dead code in `history.cpp`). If a new field is added
+to `PackageInfo`, all lists must be updated. This is inherent to the per-field
+tracking approach and is the cost of its expressiveness.
 
 ---
 
-## A Simpler Alternative: Provenance Enum
+## Why `defaulted_keys` Is the Right Mechanism
 
-Instead of tracking individual field names in `defaulted_keys`, the core insight
-of Principle 1 suggests a potentially simpler implementation:
+We initially explored replacing `defaulted_keys` with a simpler provenance
+enum (`ChannelRepodata` / `UrlStub` / `Unknown`). This would centralize the
+"what to trust" decision to `write_repodata_record()` instead of scattering
+field-name lists across creation sites.
 
-```cpp
-enum class PackageProvenance {
-    Unknown,         // Not yet classified (error if it reaches write_repodata_record)
-    ChannelRepodata, // All fields authoritative (from solver + channel repodata)
-    UrlStub,         // Only URL-derivable fields are real (from from_url(), lockfiles)
-};
-```
+However, the provenance enum is insufficient because:
 
-The merge logic in `write_repodata_record()` would become:
+1. **Trust is per-field, not per-object.** A conda lockfile with sha256
+   provides trustworthy `depends` but stub `license`. An enum can't express
+   "trust depends but not license."
+2. **The constructor has a separate merge path** with different data sources
+   (cached channel repodata JSON files). The enum doesn't help there.
+3. **The libsolv round-trip is still needed** for `from_url()` packages that
+   enter the solver via `channel_loader.cpp`. Storing an enum is simpler than
+   a comma-separated string, but the complexity savings are modest.
+4. **The enum's overlay list** ("URL-known fields to preserve") becomes the
+   new fragile maintenance point, just centralized.
 
-```cpp
-switch (m_package_info.provenance) {
-    case PackageProvenance::ChannelRepodata:
-        // PackageInfo is authoritative (solver, channel patches).
-        // Start from PackageInfo, only backfill missing from index.json.
-        repodata_record = m_package_info;   // to_json()
-        repodata_record.insert(index.cbegin(), index.cend());
-        break;
-    case PackageProvenance::UrlStub:
-        // PackageInfo has stubs for most fields.
-        // Start from index.json, overlay the few URL-known fields.
-        repodata_record = index;
-        repodata_record["url"] = m_package_info.package_url;
-        repodata_record["channel"] = m_package_info.channel;
-        repodata_record["fn"] = m_package_info.filename;
-        if (!m_package_info.md5.empty())
-            repodata_record["md5"] = m_package_info.md5;
-        if (!m_package_info.sha256.empty())
-            repodata_record["sha256"] = m_package_info.sha256;
-        break;
-    case PackageProvenance::Unknown:
-        throw std::logic_error("...");
-}
-// Then normalization (Principle 3)...
-```
-
-### Critical Assessment: Weaknesses of the Provenance Enum
-
-**Weakness 1: There are TWO merge points, not one.**
-
-`write_repodata_record()` in `package_fetcher.cpp` is only one merge point. The
-second is in `micromamba/src/constructor.cpp`, which has completely different logic:
-it reads cached channel repodata from `pkgs/cache/*.json` files (a third data
-source that `write_repodata_record()` never sees). The constructor path:
-
-- If cached channel repodata exists → use as base, backfill from `index.json`
-- If missing → use `index.json`, overlay `md5`/`sha256`/`fn`/`url`/`channel`
-  from the parsed URL
-
-The constructor already had the correct merge logic before this PR (it never
-confused URL stubs with channel repodata because it keeps them separate). The
-PR only added normalization (depends/constrains/track_features) to this path.
-
-A provenance enum only helps `write_repodata_record()`, not the constructor. The
-normalization code would still need to be shared between both paths regardless.
-
-**Weakness 2: The UrlStub merge is not perfectly symmetrical with defaulted_keys.**
-
-The current PR's approach is:
-1. `repodata_record = to_json(PackageInfo)` — full serialization including stubs
-2. Erase stub fields listed in `defaulted_keys`
-3. `insert()` from `index.json` (only adds missing)
-
-The provenance enum approach would be:
-1. `repodata_record = index` — start from `index.json`
-2. Overlay URL-known fields from `PackageInfo`
-
-These are NOT always equivalent. The `to_json()` serialization can produce fields
-that `index.json` doesn't have and the explicit overlay list doesn't cover. For
-example, `to_json()` always emits `"size": 0` and `"subdir": "linux-64"` for URL
-packages. With the `defaulted_keys` approach, these are preserved (they're not in
-the defaulted list). With the provenance enum approach, they'd need to be in the
-explicit overlay list, or they'd come from `index.json` instead.
-
-In practice, the differences are minor (`subdir` should match between URL and
-`index.json`, and `size` is handled separately). But the overlay list in the
-enum approach becomes the new fragile point — it's just centralized to one
-location instead of seven, which is better but not zero-maintenance.
-
-**Weakness 3: The provenance enum still needs to survive the libsolv round-trip.**
-
-There is a real code path where `from_url()`-derived packages enter the solver:
-`channel_loader.cpp` line 177-183 handles "package channels" (when a channel URL
-points to a `.conda` file instead of a repository). These packages are created
-via `from_url()`, pushed into the solver database via `add_repo_from_packages()`,
-and after solving, extracted via `make_package_info()`.
-
-So even with the enum approach, we still need to:
-- Store the provenance in the solv-cpp solvable wrapper
-- Retrieve it after the solver round-trip
-
-However, storing a single integer is far simpler than a comma-separated string
-in `SOLVABLE_KEYWORDS`. A single bit in `SOLVABLE_INSTALLSTATUS` (already
-repurposed for `SolvableType`) or a small integer would suffice.
-
-**Weakness 4: The "URL-known fields" list varies by package type.**
-
-For a `.conda` URL, `name`, `version`, and `build_string` are parsed from the
-filename. For a `.whl` URL, `build_string` is NOT available. For git URLs,
-almost nothing is available. With `defaulted_keys`, each `from_url()` sub-path
-declares exactly which fields are stubs. With the enum, the merge logic either:
-
-- Needs sub-type awareness (undermining the simplicity)
-- Or treats all URL types uniformly (which works in practice because
-  `index.json` provides all the correct values for `name`, `version`,
-  `build_string` anyway — overlaying from PackageInfo is harmless when they match)
-
-The second option is viable: since the enum's UrlStub merge STARTS from
-`index.json`, all tarball-internal fields (name, version, build, etc.) come from
-the correct source. Only the external-origin fields (url, channel, fn, checksums)
-need overlaying. This is actually a smaller and more obvious list than the
-`defaulted_keys` approach's "fields to erase" list.
-
-**Weakness 5: Future extensibility.**
-
-If a future lockfile format provides richer metadata (e.g., `depends` from the
-resolver plus `license` from some other source), a binary enum won't be
-sufficient. You'd need either more enum variants or to go back to per-field
-tracking. However, this is a YAGNI concern — the current needs are clearly binary.
-
-### Advantages (still valid)
-
-Despite the weaknesses, the provenance enum approach has real advantages:
-
-1. **Centralizes the "what to trust" logic** to one location in
-   `write_repodata_record()` instead of scattering it across 7 creation sites
-2. **Simpler libsolv storage**: a single int instead of a comma-separated string
-3. **Eliminates dead code**: no need for `defaulted_keys` in `history.cpp`
-   (which never flows to `write_repodata_record()` anyway)
-4. **Smaller attack surface**: the overlay list in the merge logic is small and
-   obvious (`url`, `channel`, `fn`, `md5`, `sha256`) and corresponds to fields
-   that only exist outside the tarball
-
-### Test Retainability
-
-Most tests verify *outcomes* (correct `repodata_record.json` content), not the
-*mechanism* (`defaulted_keys` field contents). Here's the breakdown:
-
-| Test | Retainable? | Notes |
-|---|---|---|
-| `write_repodata_record uses index.json for URL-derived metadata` | **Yes** | Outcome test |
-| `write_repodata_record preserves channel patched empty depends` | **Yes** | Outcome test |
-| `write_repodata_record preserves channel patched empty constrains` | **Yes** | Outcome test |
-| `write_repodata_record fails without _initialized` | **Rewrite** | Change to test `Unknown` provenance |
-| Cache healing test | **Yes** | Independent mechanism |
-| `write_repodata_record ensures depends/constrains present` | **Yes** | Outcome test |
-| `write_repodata_record omits empty track_features` | **Yes** | Outcome test |
-| `write_repodata_record ensures both checksums` | **Yes** | Outcome test |
-| `write_repodata_record backfills noarch` | **Yes** | Outcome test |
-| `write_repodata_record fills size from tarball` | **Yes** | Outcome test |
-| `PackageInfo::from_url populates defaulted_keys` (all sections) | **Rewrite** | Change to test provenance enum |
-| solv-cpp `defaulted_keys` storage test | **Rewrite** | Change to test provenance storage |
-| libsolv `defaulted_keys` round-trip tests | **Rewrite** | Change to test provenance round-trip |
-| lockfile `_initialized` in `defaulted_keys` | **Rewrite** | Change to test provenance set |
-| history `defaulted_keys` test | **Remove** | Dead code |
-| Constructor `TestURLDerivedMetadata` (Python) | **Yes** | Outcome tests |
-| Constructor `TestChannelPatchPreservation` (Python) | **Yes** | Outcome test |
-
-**Bottom line**: ~15 of 20+ test cases are fully retainable or trivially
-rewritable. The "rewrite" tests become simpler (checking an enum value instead
-of verifying field name lists). Only the history test is eliminated.
+The `defaulted_keys` mechanism is sound. The bug is not in the concept but in
+the implementation: the conda lockfile parser doesn't update `defaulted_keys`
+after populating fields with real data.
 
 ---
 
-## Summary
+## Recommended Changes
 
-If reimplementing from scratch based on the 3 principles:
+1. **Fix the lockfile dependency bug** (Bug 1): In `env_lockfile_conda.cpp`,
+   after populating dependencies/constrains from the lockfile, check if sha256
+   is present. If so, remove `"depends"` and `"constrains"` from
+   `defaulted_keys`. (~10 lines)
 
-1. Add a `PackageProvenance` enum to `PackageInfo`
-2. Set provenance in `from_url()` → `UrlStub`
-3. Set provenance in `make_package_info()` / JSON solvable creation → `ChannelRepodata`
-4. Set provenance in lockfile parsers → `UrlStub`
-5. Store/retrieve provenance through solv-cpp wrapper (simple int, not string)
-6. Modify `write_repodata_record()` to branch on provenance (Principle 2)
-7. Add normalization (Principle 3) to `write_repodata_record()` and extract a
-   shared helper for `constructor.cpp`
-8. Optionally add cache healing — this is independent and could be a separate PR
+2. **Remove dead code** (Issue 2): Remove `defaulted_keys` assignment in
+   `history.cpp`'s `read_history_url_entry()`. (~8 lines deleted)
 
-The provenance enum is NOT a magic bullet — it still requires libsolv round-trip
-support, still can't help the constructor path (which has different data sources),
-and still has a list of "URL-known fields" to maintain. But that list is small,
-obvious, centralized, and corresponds to a clear semantic concept ("fields that
-only exist outside the tarball").
+3. **Extract normalization helper** (Issue 4): Move the shared
+   depends/constrains/track_features normalization into a helper function
+   used by both `package_fetcher.cpp` and `constructor.cpp`.
 
-The real question is whether the simplification is worth the reimplementation
-cost, or whether it's better to fix the specific bugs in the current PR
-(dead code in history.cpp, DRY violation in normalization) and ship it.
+4. **Consider the fragile lists** (Issue 5): Optionally add a compile-time
+   or test-time check that the `defaulted_keys` lists cover all expected
+   fields. This is a nice-to-have, not a blocker.
