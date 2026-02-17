@@ -1080,48 +1080,48 @@ namespace
     }
 
     /**
-     * EXPECTED FAILURE: defaulted_keys is stale after post-from_url() field population
+     * EXPECTED FAILURE: Trusted lockfile dependencies should survive write_repodata_record()
      *
-     * PURPOSE: Verify that write_repodata_record() does not silently discard fields
-     * that were populated AFTER from_url() set defaulted_keys.
+     * PURPOSE: Verify that when a conda lockfile has sha256 (trustworthy metadata)
+     * and provides dependencies, those dependencies are preserved in
+     * repodata_record.json and NOT silently replaced by index.json values.
      *
-     * MOTIVATION: The defaulted_keys mechanism tracks which fields have stub values
-     * at from_url() time. But several code paths (conda lockfile parser, potential
-     * future enrichment) call from_url() and then populate some of those "defaulted"
-     * fields with real data. The defaulted_keys list is never updated to reflect
-     * this, so write_repodata_record() erases the real values and replaces them
-     * with index.json values.
+     * TRUST MODEL: The lockfile's sha256 field indicates whether the metadata
+     * is trustworthy. Lockfiles generated during the v2.1.1-v2.4.0 bug period
+     * may have corrupted metadata; missing sha256 is a corruption indicator.
+     * When sha256 IS present, dependency data from the lockfile should be
+     * trusted over index.json (since it may reflect repodata patches).
      *
      * CONCRETE EXAMPLE: The conda lockfile parser (env_lockfile_conda.cpp):
-     * 1. Calls from_url() → defaulted_keys = {"_initialized", ..., "depends", ...}
-     * 2. Copies defaulted_keys from from_url() result (line 79)
-     * 3. Populates pkg.dependencies from lockfile data (lines 82-89)
+     * 1. Parses sha256 from lockfile (line 48-51) — present here (trusted)
+     * 2. Calls from_url() → defaulted_keys includes "depends"
+     * 3. Copies defaulted_keys from from_url() (line 79)
+     * 4. Populates dependencies from lockfile (lines 82-89)
      *
-     * After step 3, the dependencies have real values (potentially reflecting
-     * repodata patches), but "depends" is still in defaulted_keys. When
-     * write_repodata_record() runs, it erases "depends" and replaces with
-     * index.json's (unpatched) values.
+     * After step 4, dependencies have real lockfile values, but "depends"
+     * remains in defaulted_keys. The fix should detect that sha256 is present
+     * (trusted) and remove "depends" from defaulted_keys so that the lockfile
+     * values are preserved in write_repodata_record().
      *
-     * This test uses dependencies to demonstrate the issue concretely, but the
-     * same class of bug affects any field that a code path populates after
-     * from_url() without updating defaulted_keys.
+     * CURRENT BEHAVIOR (BUG): "depends" in defaulted_keys causes
+     * write_repodata_record() to erase lockfile dependencies and replace
+     * with index.json values, regardless of sha256 presence.
      *
-     * CURRENT BEHAVIOR (BUG): The populated dependencies are erased because
-     * "depends" is in defaulted_keys, replaced with index.json values.
-     *
-     * EXPECTED BEHAVIOR: Populated values should survive write_repodata_record().
+     * EXPECTED BEHAVIOR: With sha256 present, lockfile dependencies should
+     * survive write_repodata_record().
      *
      * Related: https://github.com/mamba-org/mamba/issues/4095
      */
-    TEST_CASE("PackageFetcher::write_repodata_record preserves post-from_url populated fields")
+    TEST_CASE("PackageFetcher::write_repodata_record preserves trusted lockfile dependencies")
     {
         auto& ctx = mambatests::context();
         TemporaryDirectory temp_dir;
         MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
 
-        // Simulate what the conda lockfile parser produces:
-        // from_url() sets defaulted_keys including "depends" and "constrains",
-        // then the lockfile parser populates actual dependencies from lockfile data.
+        // Simulate a TRUSTED lockfile entry (sha256 present):
+        // from_url() sets defaulted_keys including "depends",
+        // then the lockfile parser populates actual dependencies.
+        // Since sha256 is present, the metadata is trustworthy.
         specs::PackageInfo pkg_info;
         pkg_info.name = "lockdep-pkg";
         pkg_info.version = "1.0";
@@ -1131,13 +1131,17 @@ namespace
         pkg_info.platform = "linux-64";
         pkg_info.package_url = "https://conda.anaconda.org/conda-forge/linux-64/lockdep-pkg-1.0-h123456_0.tar.bz2";
 
-        // Step 1: from_url() would set these defaulted_keys (includes "depends")
+        // sha256 present → trusted metadata
+        pkg_info.sha256 = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+
+        // from_url() would set these defaulted_keys (includes "depends").
+        // With the fix, the lockfile parser should remove "depends" and
+        // "constrains" from this list when sha256 is present and dependencies
+        // are populated. Currently it doesn't.
         pkg_info.defaulted_keys = { "_initialized", "build_number", "license",     "timestamp",
                                     "track_features", "depends",    "constrains" };
 
-        // Step 2: A downstream code path (e.g. conda lockfile parser) populates
-        // dependencies with real data. These may reflect repodata patches and
-        // intentionally differ from what's baked into index.json.
+        // Lockfile parser populates dependencies (potentially repodata-patched).
         pkg_info.dependencies = { "patched-dep >=2.0" };
         pkg_info.constrains = { "patched-constraint >=3.0" };
 
@@ -1147,7 +1151,7 @@ namespace
         auto info_dir = pkg_extract_dir / "info";
         fs::create_directories(info_dir);
 
-        // index.json has the ORIGINAL (pre-patch, tarball-baked) dependencies.
+        // index.json has ORIGINAL (pre-patch, tarball-baked) dependencies.
         nlohmann::json index_json;
         index_json["name"] = "lockdep-pkg";
         index_json["version"] = "1.0";
@@ -1190,12 +1194,9 @@ namespace
         nlohmann::json repodata_record;
         repodata_file >> repodata_record;
 
-        // The post-from_url() populated dependencies should be preserved,
-        // NOT replaced by index.json's original (unpatched) dependencies.
-        //
-        // BUG: "depends" is in defaulted_keys (from from_url()), so
-        // write_repodata_record() erases it and fills from index.json,
-        // silently discarding the populated values.
+        // Trusted lockfile dependencies (sha256 present) should be preserved.
+        // BUG: "depends" is in defaulted_keys, so write_repodata_record() erases
+        // it and fills from index.json, discarding the lockfile values.
         REQUIRE(repodata_record.contains("depends"));
         CHECK(repodata_record["depends"].size() == 1);
         CHECK(repodata_record["depends"][0] == "patched-dep >=2.0");
