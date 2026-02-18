@@ -426,9 +426,18 @@ namespace mamba
         return result;
     }
 
-    bool is_corrupted_cache_entry(const nlohmann::json& /*repodata_record*/)
+    bool is_corrupted_cache_entry(const nlohmann::json& repodata_record)
     {
-        // Stub: always returns false (no corruption detection yet)
-        return false;
+        // Detect legacy corruption from v2.1.1-v2.4.0:
+        // These versions wrote stub values (timestamp=0, license="") from
+        // URL-derived PackageInfo objects into repodata_record.json.
+        // Both conditions must be true simultaneously.
+        bool has_zero_timestamp = repodata_record.contains("timestamp")
+                                  && repodata_record["timestamp"].is_number()
+                                  && repodata_record["timestamp"].get<std::size_t>() == 0;
+        bool has_empty_license = repodata_record.contains("license")
+                                 && repodata_record["license"].is_string()
+                                 && repodata_record["license"].get<std::string>().empty();
+        return has_zero_timestamp && has_empty_license;
     }
 }  // namespace mamba

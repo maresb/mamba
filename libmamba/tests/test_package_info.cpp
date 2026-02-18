@@ -462,4 +462,43 @@ namespace mamba
             << "Missing fields should not be treated as corruption";
     }
 
+    TEST(PackageInfoCacheHealing, corrupted_cache_is_invalidated)
+    {
+        // Create a temp cache directory with a corrupted repodata_record.json
+        fs::path cache_dir = fs::temp_directory_path() / "test_cache_healing";
+        fs::path pkg_dir = cache_dir / "corrupt-pkg-1.0-h0";
+        fs::path info_dir = pkg_dir / "info";
+        fs::create_directories(info_dir);
+
+        // Write a corrupted repodata_record.json (timestamp=0, license="")
+        nlohmann::json corrupted_record;
+        corrupted_record["name"] = "corrupt-pkg";
+        corrupted_record["version"] = "1.0";
+        corrupted_record["build"] = "h0";
+        corrupted_record["build_number"] = 0;
+        corrupted_record["timestamp"] = 0;
+        corrupted_record["license"] = "";
+        corrupted_record["depends"] = nlohmann::json::array();
+        corrupted_record["constrains"] = nlohmann::json::array();
+        corrupted_record["md5"] = "abc123";
+        corrupted_record["url"] = "https://example.com/corrupt-pkg-1.0-h0.tar.bz2";
+        corrupted_record["channel"] = "conda-forge";
+
+        std::ofstream out(info_dir / "repodata_record.json");
+        out << corrupted_record.dump(4);
+        out.close();
+
+        // Verify corruption is detected
+        EXPECT_TRUE(is_corrupted_cache_entry(corrupted_record));
+
+        // Write a good repodata_record.json and verify it passes
+        nlohmann::json good_record = corrupted_record;
+        good_record["timestamp"] = 1700000000;
+        good_record["license"] = "MIT";
+        EXPECT_FALSE(is_corrupted_cache_entry(good_record));
+
+        // Cleanup
+        fs::remove_all(cache_dir);
+    }
+
 }  // namespace mamba
