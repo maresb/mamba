@@ -285,6 +285,59 @@ namespace
         REQUIRE(repodata_record["constrains"].empty());
     }
 
+    TEST_CASE("write_repodata_record_normalization")
+    {
+        // Test normalization invariants from Principle 6
+
+        auto pkg_info = specs::PackageInfo();
+        pkg_info.name = "normpkg";
+        pkg_info.version = "1.0";
+        pkg_info.build_string = "h0_0";
+        pkg_info.channel = "https://conda.anaconda.org/conda-forge";
+        pkg_info.package_url = "https://conda.anaconda.org/conda-forge/linux-64/normpkg-1.0-h0_0.tar.bz2";
+        pkg_info.platform = "linux-64";
+        pkg_info.filename = "normpkg-1.0-h0_0.tar.bz2";
+        pkg_info.license = "MIT";
+        pkg_info.timestamp = 1234567890;
+
+        nlohmann::json index_json;
+        index_json["name"] = "normpkg";
+        index_json["version"] = "1.0";
+        index_json["build"] = "h0_0";
+        index_json["build_number"] = 0;
+        index_json["license"] = "MIT";
+
+        SECTION("depends and constrains always present as arrays")
+        {
+            // Index.json has no depends or constrains keys at all
+            auto repodata_record = create_and_extract_package(pkg_info, index_json);
+
+            REQUIRE(repodata_record.contains("depends"));
+            REQUIRE(repodata_record["depends"].is_array());
+            REQUIRE(repodata_record.contains("constrains"));
+            REQUIRE(repodata_record["constrains"].is_array());
+        }
+
+        SECTION("empty track_features omitted")
+        {
+            auto repodata_record = create_and_extract_package(pkg_info, index_json);
+
+            // Empty track_features string should be omitted
+            bool has_empty_track = repodata_record.contains("track_features")
+                                   && repodata_record["track_features"].is_string()
+                                   && repodata_record["track_features"].get<std::string>().empty();
+            REQUIRE_FALSE(has_empty_track);
+        }
+
+        SECTION("size populated from tarball when zero")
+        {
+            auto repodata_record = create_and_extract_package(pkg_info, index_json);
+
+            REQUIRE(repodata_record.contains("size"));
+            REQUIRE(repodata_record["size"].get<std::size_t>() > 0);
+        }
+    }
+
     TEST_CASE("url_derived_stub_fields_yield_to_index_json")
     {
         // URL-derived PackageInfo has stub values for license, timestamp,

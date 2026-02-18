@@ -179,6 +179,24 @@ construct(Configuration& config, const fs::u8path& prefix, bool extract_conda_pk
                 repodata_record["size"] = fs::file_size(entry);
             }
 
+            // Normalization: depends and constrains always present as arrays
+            if (!repodata_record.contains("depends"))
+            {
+                repodata_record["depends"] = nlohmann::json::array();
+            }
+            if (!repodata_record.contains("constrains"))
+            {
+                repodata_record["constrains"] = nlohmann::json::array();
+            }
+
+            // Normalization: empty track_features omitted
+            if (auto it = repodata_record.find("track_features");
+                it != repodata_record.end() && it->is_string()
+                && it->get<std::string>().empty())
+            {
+                repodata_record.erase(it);
+            }
+
             LOG_TRACE << "Writing " << repodata_record_path;
             std::ofstream repodata_record_of{ repodata_record_path.std_path() };
             repodata_record_of << repodata_record.dump(4);
