@@ -318,6 +318,23 @@ namespace solv
         return set_signatures(str.c_str());
     }
 
+    auto ObjSolvableViewConst::defaulted_keys() const -> std::string_view
+    {
+        return ptr_to_strview(
+            ::solvable_lookup_str(const_cast<::Solvable*>(raw()), SOLVABLE_DESCRIPTION)
+        );
+    }
+
+    void ObjSolvableView::set_defaulted_keys(raw_str_view str) const
+    {
+        ::solvable_set_str(raw(), SOLVABLE_DESCRIPTION, str);
+    }
+
+    void ObjSolvableView::set_defaulted_keys(const std::string& str) const
+    {
+        return set_defaulted_keys(str.c_str());
+    }
+
     auto ObjSolvableViewConst::size() const -> std::size_t
     {
         return ::solvable_lookup_num(const_cast<::Solvable*>(raw()), SOLVABLE_DOWNLOADSIZE, 0);

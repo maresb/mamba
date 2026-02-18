@@ -10,6 +10,7 @@
 #include <variant>
 
 #include <fmt/ostream.h>
+#include <fmt/ranges.h>
 #include <simdjson.h>
 #include <solv/conda.h>
 #include <solv/repo.h>
@@ -101,6 +102,13 @@ namespace mamba::solver::libsolv
 
         solv.add_track_features(pkg.track_features);
 
+        if (!pkg.defaulted_keys.empty())
+        {
+            solv.set_defaulted_keys(
+                fmt::format("{}", fmt::join(pkg.defaulted_keys, ","))
+            );
+        }
+
         solv.add_self_provide();
     }
 
@@ -144,6 +152,11 @@ namespace mamba::solver::libsolv
             auto feats = s.track_features();
             out.track_features.reserve(feats.size());
             std::transform(feats.begin(), feats.end(), std::back_inserter(out.track_features), id_to_str);
+        }
+
+        if (auto dk_str = s.defaulted_keys(); !dk_str.empty())
+        {
+            out.defaulted_keys = util::split(dk_str, ",");
         }
 
         return out;
