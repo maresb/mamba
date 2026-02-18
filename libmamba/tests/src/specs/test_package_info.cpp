@@ -134,8 +134,6 @@ namespace
 
     TEST_CASE("PackageInfo::from_url sets defaulted_keys for stub fields")
     {
-        using StrVec = std::vector<std::string>;
-
         SECTION("URL-derived package marks non-derivable fields as defaulted")
         {
             static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/pkg-6.4-bld.conda";
