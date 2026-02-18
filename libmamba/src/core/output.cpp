@@ -15,6 +15,7 @@
 #include "mamba/core/url.hpp"
 #include "mamba/core/util.hpp"
 
+#include <cstdint>
 #include "termcolor/termcolor.hpp"
 
 #include <algorithm>

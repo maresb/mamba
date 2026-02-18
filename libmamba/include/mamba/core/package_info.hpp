@@ -66,6 +66,28 @@ namespace mamba
         std::string extra_metadata;
         std::set<std::string> defaulted_keys;
     };
+
+    /** Merge PackageInfo with index.json to produce repodata_record.json content.
+     *
+     * Fields in pkg.defaulted_keys are stubs and yield to index_json.
+     * All other PackageInfo fields are authoritative and override index_json.
+     *
+     * @param pkg The PackageInfo object (may contain stub fields).
+     * @param index_json The index.json content from the extracted package.
+     * @param tarball_size Optional file size of the tarball (used if size is missing).
+     * @return The merged JSON for repodata_record.json.
+     */
+    nlohmann::json merge_repodata_record(const PackageInfo& pkg,
+                                         const nlohmann::json& index_json,
+                                         std::size_t tarball_size = 0);
+
+    /** Detect potentially corrupted cache entries from v2.1.1-v2.4.0.
+     *
+     * The corruption signature is timestamp == 0 AND license == "".
+     * False positives (legitimate packages with both values) are acceptable
+     * as the only consequence is unnecessary re-extraction.
+     */
+    bool is_corrupted_cache_entry(const nlohmann::json& repodata_record);
 }  // namespace mamba
 
 #endif

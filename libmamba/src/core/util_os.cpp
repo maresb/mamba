@@ -1,5 +1,6 @@
 #include <regex>
 
+#include <cstdint>
 #include "termcolor/termcolor.hpp"
 #include "mamba/core/environment.hpp"
 #include "mamba/core/util_os.hpp"

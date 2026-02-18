@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include <cstdint>
 #include "termcolor/termcolor.hpp"
 
 

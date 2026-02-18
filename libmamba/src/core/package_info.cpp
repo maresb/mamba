@@ -211,6 +211,23 @@ namespace mamba
             extra_metadata = "{}";
 
         queue_free(&q);
+
+        // Principle 5: For URL-derived packages (from __explicit_specs__ repo),
+        // fields not derivable from the URL are stubs and must be marked.
+        // This ensures field trust survives the solver round-trip.
+        if (s->repo && strcmp(s->repo->name, "__explicit_specs__") == 0)
+        {
+            defaulted_keys.insert("build_number");
+            defaulted_keys.insert("license");
+            defaulted_keys.insert("timestamp");
+            defaulted_keys.insert("track_features");
+            defaulted_keys.insert("size");
+            // URL-derived packages never carry real dependency data,
+            // so always mark these as defaulted regardless of what
+            // solvable_lookup_deparray returned.
+            defaulted_keys.insert("depends");
+            defaulted_keys.insert("constrains");
+        }
     }
 
     PackageInfo::PackageInfo(nlohmann::json&& j)
@@ -358,5 +375,69 @@ namespace mamba
     {
         // TODO channel contains subdir right now?!
         return concat(channel, "::", name, "-", version, "-", build_string);
+    }
+    nlohmann::json merge_repodata_record(const PackageInfo& pkg,
+                                         const nlohmann::json& index_json,
+                                         std::size_t tarball_size)
+    {
+        // Start with index.json as the base (package builder's metadata).
+        nlohmann::json result = index_json;
+
+        // Build the full PackageInfo JSON.
+        nlohmann::json pkg_json = pkg.json_record();
+
+        // Override index.json with authoritative fields from PackageInfo.
+        // Fields listed in defaulted_keys are stubs and must NOT override.
+        for (auto it = pkg_json.begin(); it != pkg_json.end(); ++it)
+        {
+            if (pkg.defaulted_keys.find(it.key()) == pkg.defaulted_keys.end())
+            {
+                result[it.key()] = it.value();
+            }
+        }
+
+        // Normalization (Principle 6):
+        // depends and constrains are always present as JSON arrays.
+        if (!result.contains("depends"))
+        {
+            result["depends"] = nlohmann::json::array();
+        }
+        if (!result.contains("constrains"))
+        {
+            result["constrains"] = nlohmann::json::array();
+        }
+
+        // track_features is omitted when empty.
+        if (result.contains("track_features") && result["track_features"].is_string()
+            && result["track_features"].get<std::string>().empty())
+        {
+            result.erase("track_features");
+        }
+
+        // size must be present and non-zero.
+        if (!result.contains("size") || result["size"] == 0)
+        {
+            if (tarball_size > 0)
+            {
+                result["size"] = tarball_size;
+            }
+        }
+
+        return result;
+    }
+
+    bool is_corrupted_cache_entry(const nlohmann::json& repodata_record)
+    {
+        // Detect legacy corruption from v2.1.1-v2.4.0:
+        // These versions wrote stub values (timestamp=0, license="") from
+        // URL-derived PackageInfo objects into repodata_record.json.
+        // Both conditions must be true simultaneously.
+        bool has_zero_timestamp = repodata_record.contains("timestamp")
+                                  && repodata_record["timestamp"].is_number()
+                                  && repodata_record["timestamp"].get<std::size_t>() == 0;
+        bool has_empty_license = repodata_record.contains("license")
+                                 && repodata_record["license"].is_string()
+                                 && repodata_record["license"].get<std::string>().empty();
+        return has_zero_timestamp && has_empty_license;
     }
 }  // namespace mamba

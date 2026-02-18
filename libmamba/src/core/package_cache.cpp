@@ -7,6 +7,7 @@
 #include "mamba/core/package_cache.hpp"
 #include "nlohmann/json.hpp"
 #include "mamba/core/package_handling.hpp"
+#include "mamba/core/package_info.hpp"
 #include "mamba/core/validate.hpp"
 #include "mamba/core/url.hpp"
 
@@ -186,6 +187,19 @@ namespace mamba
                     repodata_record_f >> repodata_record;
 
                     valid = true;
+
+                    // Principle 7: Detect legacy cache corruption
+                    if (is_corrupted_cache_entry(repodata_record))
+                    {
+                        LOG_WARNING << "Extracted package cache '"
+                                    << extracted_dir.string()
+                                    << "' has corruption signature "
+                                       "(timestamp=0, license=\"\"), "
+                                       "invalidating to trigger re-extraction";
+                        valid = false;
+                        m_valid_extracted_dir[pkg] = valid;
+                        return valid;
+                    }
 
                     // we can only validate if we have at least one data point of these three
                     can_validate = (!s.md5.empty() && repodata_record.contains("md5"))

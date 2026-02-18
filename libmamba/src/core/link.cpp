@@ -9,6 +9,7 @@
 #include <tuple>
 #include <vector>
 
+#include <cstdint>
 #include "termcolor/termcolor.hpp"
 #include <reproc++/run.hpp>
 

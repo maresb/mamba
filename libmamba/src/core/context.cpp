@@ -11,6 +11,7 @@
 #include "mamba/core/thread_utils.hpp"
 #include "mamba/core/util.hpp"
 
+#include <cstdint>
 #include "termcolor/termcolor.hpp"
 
 namespace mamba

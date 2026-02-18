@@ -11,6 +11,7 @@
 #include "mamba/version.hpp"
 #include "mamba/core/context.hpp"
 
+#include <cstdint>
 #include "termcolor/termcolor.hpp"
 
 

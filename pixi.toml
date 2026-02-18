@@ -1,0 +1,103 @@
+[workspace]
+name = "mamba"
+version = "0.1.0"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+# C++ build dependencies
+# Note: cxx-compiler is a metapackage with versions like 1.8, 1.9, 1.10.
+# <1.11 matches the upstream dev/environment-dev.yml constraint for GCC 13 compatibility.
+cxx-compiler = "<1.11"
+sysroot_linux-64 = "2.17"
+cmake = ">=3.16"
+pkg-config = "*"
+ninja = "*"
+make = "*"
+# libmamba dependencies
+cpp-expected = "*"
+fmt = ">=9,<11"
+libarchive = ">=3.8"
+libcurl = ">=7.86"
+libsodium = "*"
+libsolv = ">=0.7.18"
+nlohmann_json = "*"
+reproc-cpp = ">=14.2.4.post0"
+simdjson = ">=3.3.0"
+spdlog = ">=1.11,<1.15"
+yaml-cpp = ">=0.8.0"
+# libmamba test dependencies
+gtest = "*"
+# micromamba dependencies
+cli11 = ">=2.2"
+# Python test dependencies
+python = "*"
+pytest = ">=7.3.0"
+pytest-asyncio = "*"
+pytest-timeout = "*"
+pytest-xprocess = "*"
+pytest-rerunfailures = "*"
+pytest-cov = "*"
+requests = "*"
+cryptography = "*"
+# libmambapy build dependencies
+scikit-build-core = "*"
+pybind11 = ">=3.0.0"
+# dev dependencies
+pre-commit = "*"
+ccache = "*"
+termcolor-cpp = ">=2.1.0,<3"
+cpp-filesystem = ">=1.5.12,<2"
+
+# ============================================================================
+# Tasks for building and testing
+# ============================================================================
+
+[tasks]
+# ============================================================================
+# Build Tasks (for fresh setup with pixi)
+# ============================================================================
+
+# Configure CMake build directory using the shared library preset
+configure = "cmake -B build -G Ninja -DBUILD_LIBMAMBA=ON -DBUILD_SHARED=ON -DBUILD_LIBMAMBA_TESTS=ON -DBUILD_MICROMAMBA=ON -DCMAKE_BUILD_TYPE=Debug -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_CXX_FLAGS='-DFMT_HEADER_ONLY'"
+
+# Build all targets (runs configure first)
+build = { cmd = "cmake --build build -j", depends-on = ["configure"] }
+
+# Build only the test executable
+build-tests = { cmd = "cmake --build build --target test_libmamba -j", depends-on = ["configure"] }
+
+# Build only the mamba executable
+build-mamba = { cmd = "cmake --build build --target micromamba -j", depends-on = ["configure"] }
+
+# Clean build directory
+clean = "rm -rf build"
+
+# ============================================================================
+# Test Tasks (assume build already exists - for use with pre-built binaries)
+# ============================================================================
+
+# Run all C++ tests (assumes build exists)
+test-cpp = "./build/libmamba/tests/test_libmamba"
+
+# Run C++ PackageInfo tests
+test-cpp-package-info = "./build/libmamba/tests/test_libmamba 'PackageInfo*'"
+
+# Run C++ PackageFetcher tests  
+test-cpp-package-fetcher = "./build/libmamba/tests/test_libmamba 'PackageFetcher*'"
+
+# Run Python constructor tests (TestURLDerivedMetadata)
+test-py-constructor = { cmd = "pytest micromamba/tests/test_constructor.py::TestURLDerivedMetadata -v", env = { MAMBA_ROOT_PREFIX = "/tmp/mamba_root", CONDA_PREFIX = "/tmp/mamba_root", TEST_MAMBA_EXE = "build/micromamba/mamba" } }
+
+# Run all relevant tests for the defaulted_keys feature (GitHub #4095)
+test-defaulted-keys = { depends-on = ["test-cpp-package-info", "test-cpp-package-fetcher", "test-py-constructor"] }
+
+# List available C++ tests
+list-tests = "./build/libmamba/tests/test_libmamba --list-tests"
+
+# ============================================================================
+# Full Build + Test Tasks (for CI or fresh setup)
+# ============================================================================
+
+# Build and run all defaulted_keys tests
+ci-test-defaulted-keys = { depends-on = ["build-tests", "build-mamba", "test-defaulted-keys"] }
