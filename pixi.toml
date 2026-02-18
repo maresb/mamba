@@ -46,6 +46,7 @@ pybind11 = ">=3.0.0"
 # dev dependencies
 pre-commit = "*"
 ccache = "*"
+msgpack-c = ">=6.1.0,<7"
 
 # ============================================================================
 # Tasks for building and testing
