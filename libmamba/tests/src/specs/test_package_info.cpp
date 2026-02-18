@@ -132,6 +132,65 @@ namespace
         }
     }
 
+    TEST_CASE("PackageInfo::from_url sets defaulted_keys for stub fields")
+    {
+        using StrVec = std::vector<std::string>;
+
+        SECTION("URL-derived package marks non-derivable fields as defaulted")
+        {
+            static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/pkg-6.4-bld.conda";
+            auto pkg = PackageInfo::from_url(url).value();
+
+            // Fields derivable from URL should NOT be in defaulted_keys
+            auto& dk = pkg.defaulted_keys;
+            REQUIRE(std::find(dk.begin(), dk.end(), "name") == dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "version") == dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "build_string") == dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "channel") == dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "subdir") == dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "fn") == dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "url") == dk.end());
+
+            // Fields NOT derivable from URL SHOULD be in defaulted_keys
+            REQUIRE(std::find(dk.begin(), dk.end(), "build_number") != dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "license") != dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "timestamp") != dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "depends") != dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "constrains") != dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "track_features") != dk.end());
+        }
+
+        SECTION("URL with md5 hash does not mark md5 as defaulted")
+        {
+            static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/pkg-6.4-bld.conda#7dbaa197d7ba6032caf7ae7f32c1efa0";
+            auto pkg = PackageInfo::from_url(url).value();
+
+            auto& dk = pkg.defaulted_keys;
+            REQUIRE(std::find(dk.begin(), dk.end(), "md5") == dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "sha256") != dk.end());
+        }
+
+        SECTION("URL with sha256 hash does not mark sha256 as defaulted")
+        {
+            static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/pkg-6.4-bld.conda#sha256:7dbaa197d7ba6032caf7ae7f32c1efa07dbaa197d7ba6032caf7ae7f32c1efa0";
+            auto pkg = PackageInfo::from_url(url).value();
+
+            auto& dk = pkg.defaulted_keys;
+            REQUIRE(std::find(dk.begin(), dk.end(), "sha256") == dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "md5") != dk.end());
+        }
+
+        SECTION("URL without hash marks both md5 and sha256 as defaulted")
+        {
+            static constexpr std::string_view url = "https://conda.anaconda.org/conda-forge/linux-64/pkg-6.4-bld.conda";
+            auto pkg = PackageInfo::from_url(url).value();
+
+            auto& dk = pkg.defaulted_keys;
+            REQUIRE(std::find(dk.begin(), dk.end(), "md5") != dk.end());
+            REQUIRE(std::find(dk.begin(), dk.end(), "sha256") != dk.end());
+        }
+    }
+
     TEST_CASE("PackageInfo serialization")
     {
         using StrVec = std::vector<std::string>;
