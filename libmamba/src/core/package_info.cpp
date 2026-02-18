@@ -211,6 +211,23 @@ namespace mamba
             extra_metadata = "{}";
 
         queue_free(&q);
+
+        // Principle 5: For URL-derived packages (from __explicit_specs__ repo),
+        // fields not derivable from the URL are stubs and must be marked.
+        // This ensures field trust survives the solver round-trip.
+        if (s->repo && strcmp(s->repo->name, "__explicit_specs__") == 0)
+        {
+            defaulted_keys.insert("build_number");
+            defaulted_keys.insert("license");
+            defaulted_keys.insert("timestamp");
+            defaulted_keys.insert("track_features");
+            defaulted_keys.insert("size");
+            // URL-derived packages never carry real dependency data,
+            // so always mark these as defaulted regardless of what
+            // solvable_lookup_deparray returned.
+            defaulted_keys.insert("depends");
+            defaulted_keys.insert("constrains");
+        }
     }
 
     PackageInfo::PackageInfo(nlohmann::json&& j)
