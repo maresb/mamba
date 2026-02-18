@@ -82,14 +82,20 @@ test-cpp = "./build/libmamba/tests/test_libmamba"
 # Run C++ PackageInfo tests
 test-cpp-package-info = "./build/libmamba/tests/test_libmamba 'PackageInfo*'"
 
-# Run C++ PackageFetcher tests  
-test-cpp-package-fetcher = "./build/libmamba/tests/test_libmamba 'PackageFetcher*'"
+# Run C++ PackageFetcher / repodata_record tests
+test-cpp-package-fetcher = "./build/libmamba/tests/test_libmamba 'build_download_request,extract_creates*,solver_derived*,url_derived*,write_repodata*,legacy_corrupted*'"
+
+# Run C++ defaulted_keys solver round-trip tests
+test-cpp-solver-roundtrip = "./build/libmamba/tests/test_libmamba 'defaulted_keys*'"
+
+# Run C++ lockfile defaulted_keys tests
+test-cpp-lockfile-defaulted-keys = "./build/libmamba/tests/test_libmamba 'env-lockfile conda_lockfile_with_sha256*,env-lockfile mambajs_lockfile*'"
 
 # Run Python constructor tests (TestURLDerivedMetadata)
 test-py-constructor = { cmd = "pytest micromamba/tests/test_constructor.py::TestURLDerivedMetadata -v", env = { MAMBA_ROOT_PREFIX = "/tmp/mamba_root", CONDA_PREFIX = "/tmp/mamba_root", TEST_MAMBA_EXE = "build/micromamba/mamba" } }
 
 # Run all relevant tests for the defaulted_keys feature (GitHub #4095)
-test-defaulted-keys = { depends-on = ["test-cpp-package-info", "test-cpp-package-fetcher", "test-py-constructor"] }
+test-defaulted-keys = { depends-on = ["test-cpp-package-info", "test-cpp-package-fetcher", "test-cpp-solver-roundtrip", "test-cpp-lockfile-defaulted-keys"] }
 
 # List available C++ tests
 list-tests = "./build/libmamba/tests/test_libmamba --list-tests"
