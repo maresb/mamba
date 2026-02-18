@@ -261,6 +261,10 @@ namespace mamba
                     p.md5 = u.substr(hash + 1);
                     ms.brackets["md5"] = u.substr(hash + 1);
                 }
+                // Principle 4: URL-derived packages have stub values for
+                // fields not derivable from the URL.
+                p.defaulted_keys = {"build_number", "license", "timestamp",
+                                    "depends", "constrains", "track_features", "size"};
                 pi_result.push_back(p);
                 ms_result.push_back(ms);
             }

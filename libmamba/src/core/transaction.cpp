@@ -83,20 +83,15 @@ namespace mamba
         fs::path repodata_record_path = base_path / "info" / "repodata_record.json";
         fs::path index_path = base_path / "info" / "index.json";
 
-        nlohmann::json index, solvable_json;
+        nlohmann::json index_json;
         std::ifstream index_file = open_ifstream(index_path);
-        index_file >> index;
+        index_file >> index_json;
 
-        solvable_json = m_package_info.json_record();
-        index.insert(solvable_json.cbegin(), solvable_json.cend());
-
-        if (index.find("size") == index.end() || index["size"] == 0)
-        {
-            index["size"] = fs::file_size(m_tarball_path);
-        }
+        std::size_t tarball_size = fs::file_size(m_tarball_path);
+        nlohmann::json result = merge_repodata_record(m_package_info, index_json, tarball_size);
 
         std::ofstream repodata_record(repodata_record_path);
-        repodata_record << index.dump(4);
+        repodata_record << result.dump(4);
     }
 
     static std::mutex urls_txt_mutex;
@@ -373,6 +368,10 @@ namespace mamba
             {
                 p.sha256 = ms.brackets.at("sha256");
             }
+            // Principle 4: URL-derived packages have stub values for
+            // fields not derivable from the URL.
+            p.defaulted_keys = {"build_number", "license", "timestamp",
+                                "depends", "constrains", "track_features", "size"};
             pi_result.push_back(p);
         }
 

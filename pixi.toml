@@ -68,7 +68,7 @@ build = { cmd = "cmake --build build -j", depends-on = ["configure"] }
 build-tests = { cmd = "cmake --build build --target test_libmamba -j", depends-on = ["configure"] }
 
 # Build only the mamba executable
-build-mamba = { cmd = "cmake --build build --target mamba -j", depends-on = ["configure"] }
+build-mamba = { cmd = "cmake --build build --target micromamba -j", depends-on = ["configure"] }
 
 # Clean build directory
 clean = "rm -rf build"

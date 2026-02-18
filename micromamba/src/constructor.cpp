@@ -90,35 +90,37 @@ construct(const fs::path& prefix, bool extract_conda_pkgs, bool extract_tarball)
                 fs::path repodata_record_path = base_path / "info" / "repodata_record.json";
                 fs::path index_path = base_path / "info" / "index.json";
 
-                nlohmann::json index;
+                nlohmann::json index_json;
                 std::ifstream index_file(index_path);
-                index_file >> index;
+                index_file >> index_json;
 
-                std::string pkg_name = index["name"];
-
-                index["fn"] = entry.path().filename();
+                // Find matching pkg_info from URL list
+                PackageInfo matched_pkg(std::string(index_json.value("name", "")));
+                matched_pkg.fn = entry.path().filename().string();
+                // Constructor-path packages are URL-derived: mark stub fields
+                matched_pkg.defaulted_keys = {"build_number", "license", "timestamp",
+                                              "depends", "constrains", "track_features", "size"};
                 for (const auto& pkg_info : package_details)
                 {
                     if (pkg_info.fn == entry.path().filename())
                     {
-                        index["url"] = pkg_info.url;
-                        index["channel"] = pkg_info.channel;
-                        index["size"] = fs::file_size(entry.path());
-                        if (!pkg_info.md5.empty())
-                        {
-                            index["md5"] = pkg_info.md5;
-                        }
-                        if (!pkg_info.sha256.empty())
-                        {
-                            index["sha256"] = pkg_info.sha256;
-                        }
+                        matched_pkg.url = pkg_info.url;
+                        matched_pkg.channel = pkg_info.channel;
+                        matched_pkg.md5 = pkg_info.md5;
+                        matched_pkg.sha256 = pkg_info.sha256;
+                        matched_pkg.version = pkg_info.version;
+                        matched_pkg.build_string = pkg_info.build_string;
+                        matched_pkg.subdir = pkg_info.subdir;
                         break;
                     }
                 }
 
+                std::size_t tarball_size = fs::file_size(entry.path());
+                nlohmann::json result = merge_repodata_record(matched_pkg, index_json, tarball_size);
+
                 LOG_TRACE << "Writing " << repodata_record_path;
                 std::ofstream repodata_record(repodata_record_path);
-                repodata_record << index.dump(4);
+                repodata_record << result.dump(4);
             }
         }
     }
