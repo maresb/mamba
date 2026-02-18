@@ -494,6 +494,53 @@ namespace mamba
         EXPECT_EQ(result["license"], "BSD");
     }
 
+    // Principle 6: md5 and sha256 should be present when available from either source
+    TEST(PackageInfoMerge, checksums_from_either_source)
+    {
+        // Case 1: PackageInfo has checksums, index.json doesn't
+        PackageInfo pkg1(std::string("checksum-pkg"));
+        pkg1.version = "1.0";
+        pkg1.build_string = "h0";
+        pkg1.md5 = "md5fromurl";
+        pkg1.sha256 = "sha256fromurl";
+        pkg1.channel = "conda-forge";
+        pkg1.url = "https://example.com/checksum-pkg-1.0-h0.tar.bz2";
+        pkg1.subdir = "linux-64";
+        pkg1.fn = "checksum-pkg-1.0-h0.tar.bz2";
+
+        nlohmann::json index1;
+        index1["name"] = "checksum-pkg";
+        index1["version"] = "1.0";
+        index1["build"] = "h0";
+
+        nlohmann::json result1 = merge_repodata_record(pkg1, index1);
+        EXPECT_EQ(result1["md5"], "md5fromurl");
+        EXPECT_EQ(result1["sha256"], "sha256fromurl");
+
+        // Case 2: index.json has checksums, PackageInfo doesn't
+        PackageInfo pkg2(std::string("checksum-pkg"));
+        pkg2.version = "1.0";
+        pkg2.build_string = "h0";
+        pkg2.channel = "conda-forge";
+        pkg2.url = "https://example.com/checksum-pkg-1.0-h0.tar.bz2";
+        pkg2.subdir = "linux-64";
+        pkg2.fn = "checksum-pkg-1.0-h0.tar.bz2";
+        // No md5/sha256
+
+        nlohmann::json index2;
+        index2["name"] = "checksum-pkg";
+        index2["version"] = "1.0";
+        index2["build"] = "h0";
+        index2["md5"] = "md5fromindex";
+        index2["sha256"] = "sha256fromindex";
+
+        nlohmann::json result2 = merge_repodata_record(pkg2, index2);
+        EXPECT_TRUE(result2.contains("md5"));
+        EXPECT_EQ(result2["md5"], "md5fromindex");
+        EXPECT_TRUE(result2.contains("sha256"));
+        EXPECT_EQ(result2["sha256"], "sha256fromindex");
+    }
+
     TEST(PackageInfoCacheHealing, corrupted_cache_is_invalidated)
     {
         // Create a temp cache directory with a corrupted repodata_record.json
