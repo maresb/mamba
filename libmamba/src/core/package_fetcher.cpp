@@ -452,23 +452,41 @@ namespace mamba
 
         nlohmann::json repodata_record = m_package_info;
 
-        // For explicit spec files (URLs), m_package_info has empty depends/constrains arrays
-        // that would overwrite the correct values from index.json. Remove these empty fields.
-        if (auto depends_it = repodata_record.find("depends");
-            depends_it != repodata_record.end() && depends_it->empty())
+        // Use origin-based merge: fields listed in defaulted_keys are stubs
+        // from URL parsing or similar; they must yield to index.json values.
+        // Authoritative fields (not in defaulted_keys) take precedence over index.json.
+        const auto& dk = m_package_info.defaulted_keys;
+        for (const auto& key : dk)
         {
-            repodata_record.erase("depends");
-        }
-        if (auto constrains_it = repodata_record.find("constrains");
-            constrains_it != repodata_record.end() && constrains_it->empty())
-        {
-            repodata_record.erase("constrains");
+            if (index.contains(key))
+            {
+                repodata_record[key] = index[key];
+            }
+            else
+            {
+                repodata_record.erase(key);
+            }
         }
 
-        // To take correction of packages metadata (e.g. made using repodata patches) into account,
-        // we insert the index into the repodata record to only add new fields from the index
-        // while keeping the existing fields from the repodata record.
+        // Backfill: add fields from index.json that are not yet in repodata_record
         repodata_record.insert(index.cbegin(), index.cend());
+
+        // Normalization: depends and constrains always present as arrays
+        if (!repodata_record.contains("depends"))
+        {
+            repodata_record["depends"] = nlohmann::json::array();
+        }
+        if (!repodata_record.contains("constrains"))
+        {
+            repodata_record["constrains"] = nlohmann::json::array();
+        }
+
+        // Normalization: track_features omitted when empty
+        if (auto it = repodata_record.find("track_features");
+            it != repodata_record.end() && it->is_string() && it->get<std::string>().empty())
+        {
+            repodata_record.erase(it);
+        }
 
         if (repodata_record.find("size") == repodata_record.end() || repodata_record["size"] == 0)
         {
