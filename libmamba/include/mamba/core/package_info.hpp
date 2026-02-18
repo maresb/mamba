@@ -80,6 +80,14 @@ namespace mamba
     nlohmann::json merge_repodata_record(const PackageInfo& pkg,
                                          const nlohmann::json& index_json,
                                          std::size_t tarball_size = 0);
+
+    /** Detect potentially corrupted cache entries from v2.1.1-v2.4.0.
+     *
+     * The corruption signature is timestamp == 0 AND license == "".
+     * False positives (legitimate packages with both values) are acceptable
+     * as the only consequence is unnecessary re-extraction.
+     */
+    bool is_corrupted_cache_entry(const nlohmann::json& repodata_record);
 }  // namespace mamba
 
 #endif

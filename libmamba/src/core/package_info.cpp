@@ -425,4 +425,10 @@ namespace mamba
 
         return result;
     }
+
+    bool is_corrupted_cache_entry(const nlohmann::json& /*repodata_record*/)
+    {
+        // Stub: always returns false (no corruption detection yet)
+        return false;
+    }
 }  // namespace mamba

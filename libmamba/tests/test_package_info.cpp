@@ -424,4 +424,42 @@ namespace mamba
         fs::remove_all(tmp_dir);
     }
 
+    // =========================================================================
+    // Principle 7: Healing legacy cache corruption.
+    // Caches written by v2.1.1-v2.4.0 may have timestamp=0 AND license=""
+    // in repodata_record.json. These should be detected and the cache
+    // invalidated.
+    // =========================================================================
+
+    TEST(PackageInfoMerge, detect_corrupted_cache_signature)
+    {
+        // Test the is_corrupted_cache_entry helper function
+        nlohmann::json good_record;
+        good_record["timestamp"] = 1700000000;
+        good_record["license"] = "MIT";
+        EXPECT_FALSE(is_corrupted_cache_entry(good_record));
+
+        nlohmann::json zero_timestamp;
+        zero_timestamp["timestamp"] = 0;
+        zero_timestamp["license"] = "MIT";
+        EXPECT_FALSE(is_corrupted_cache_entry(zero_timestamp))
+            << "timestamp=0 alone is not corruption";
+
+        nlohmann::json empty_license;
+        empty_license["timestamp"] = 1700000000;
+        empty_license["license"] = "";
+        EXPECT_FALSE(is_corrupted_cache_entry(empty_license))
+            << "license='' alone is not corruption";
+
+        nlohmann::json corrupted;
+        corrupted["timestamp"] = 0;
+        corrupted["license"] = "";
+        EXPECT_TRUE(is_corrupted_cache_entry(corrupted))
+            << "timestamp=0 AND license='' indicates corruption";
+
+        nlohmann::json missing_fields;
+        EXPECT_FALSE(is_corrupted_cache_entry(missing_fields))
+            << "Missing fields should not be treated as corruption";
+    }
+
 }  // namespace mamba
