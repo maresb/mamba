@@ -422,6 +422,75 @@ namespace mamba
             REQUIRE_FALSE(is_env_lockfile_name(fs::u8path{ "../../some/dir/something" }.string()));
         }
 
+        TEST_CASE("env-lockfile conda_lockfile_with_sha256_marks_non_lockfile_fields_as_defaulted")
+        {
+            const auto maybe_lockfile = read_environment_lockfile(
+                mambatests::test_data_dir / "env_lockfile/good_multiple_packages-lock.yaml"
+            );
+            REQUIRE(maybe_lockfile);
+
+            const auto lockfile = maybe_lockfile.value();
+            const auto packages = lockfile.get_packages_for(
+                { .category = "main", .platform = "linux-64", .manager = "conda" }
+            );
+            REQUIRE_FALSE(packages.empty());
+
+            for (const auto& pkg : packages)
+            {
+                const auto& dk = pkg.defaulted_keys;
+                auto has_key = [&](const std::string& key)
+                { return std::find(dk.begin(), dk.end(), key) != dk.end(); };
+
+                // Fields not in lockfile format are always defaulted
+                REQUIRE(has_key("build_number"));
+                REQUIRE(has_key("license"));
+                REQUIRE(has_key("timestamp"));
+                REQUIRE(has_key("track_features"));
+                REQUIRE(has_key("size"));
+
+                // sha256 is present in the lockfile data → depends/constrains are trusted
+                if (!pkg.sha256.empty())
+                {
+                    REQUIRE_FALSE(has_key("depends"));
+                    REQUIRE_FALSE(has_key("constrains"));
+                }
+            }
+        }
+
+        TEST_CASE("env-lockfile mambajs_lockfile_marks_deps_as_defaulted")
+        {
+            const auto maybe_lockfile = read_environment_lockfile(
+                mambatests::test_data_dir / "env_lockfile/good_multiple_packages-lock.json"
+            );
+            REQUIRE(maybe_lockfile);
+
+            const auto lockfile = maybe_lockfile.value();
+            const auto packages = lockfile.get_packages_for(
+                { .category = "main",
+                  .platform = "emscripten-wasm32",
+                  .manager = "conda" }
+            );
+            REQUIRE_FALSE(packages.empty());
+
+            for (const auto& pkg : packages)
+            {
+                const auto& dk = pkg.defaulted_keys;
+                auto has_key = [&](const std::string& key)
+                { return std::find(dk.begin(), dk.end(), key) != dk.end(); };
+
+                // Mambajs lockfile doesn't provide depends/constrains → defaulted
+                REQUIRE(has_key("depends"));
+                REQUIRE(has_key("constrains"));
+
+                // Other fields not in mambajs format are also defaulted
+                REQUIRE(has_key("build_number"));
+                REQUIRE(has_key("license"));
+                REQUIRE(has_key("timestamp"));
+                REQUIRE(has_key("track_features"));
+                REQUIRE(has_key("size"));
+            }
+        }
+
         TEST_CASE("env-lockfile deduce_env_lockfile_format")
         {
             REQUIRE(deduce_env_lockfile_format("something-lock.yaml") == EnvLockfileFormat::conda_yaml);

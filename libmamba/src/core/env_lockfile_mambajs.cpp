@@ -96,6 +96,17 @@ namespace mamba
                 // chosen channel mirror url
             }
 
+            // Mambajs lockfile doesn't provide these fields
+            package.info.defaulted_keys = {
+                "build_number",
+                "license",
+                "timestamp",
+                "depends",
+                "constrains",
+                "track_features",
+                "size",
+            };
+
             return package;
         }
 

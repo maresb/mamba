@@ -58,6 +58,7 @@ namespace solv
         auto noarch() const -> std::string_view;
         auto sha256() const -> std::string_view;
         auto signatures() const -> std::string_view;
+        auto defaulted_keys() const -> std::string_view;
         auto size() const -> std::size_t;
         auto timestamp() const -> std::size_t;
 
@@ -218,6 +219,9 @@ namespace solv
          */
         void set_signatures(raw_str_view str) const;
         void set_signatures(const std::string& str) const;
+
+        void set_defaulted_keys(raw_str_view str) const;
+        void set_defaulted_keys(const std::string& str) const;
 
         /**
          * Set the size of the solvable size.

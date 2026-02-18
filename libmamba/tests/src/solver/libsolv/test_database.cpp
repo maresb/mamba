@@ -531,4 +531,48 @@ namespace
             );
         }
     }
+
+    TEST_CASE("defaulted_keys survives solver round-trip")
+    {
+        auto db = libsolv::Database({});
+
+        auto pkg = specs::PackageInfo::from_url(
+                       "https://conda.anaconda.org/conda-forge/linux-64/somepkg-1.0-h0_0.conda"
+        )
+                       .value();
+        pkg.filename = "somepkg-1.0-h0_0.conda";
+
+        REQUIRE_FALSE(pkg.defaulted_keys.empty());
+
+        auto repo = db.add_repo_from_packages(std::array{ pkg }, "test");
+
+        bool found = false;
+        db.for_each_package_in_repo(
+            repo,
+            [&](const specs::PackageInfo& p)
+            {
+                if (p.name == "somepkg")
+                {
+                    found = true;
+
+                    auto has_key = [&](const std::string& key)
+                    {
+                        return std::find(
+                                   p.defaulted_keys.begin(),
+                                   p.defaulted_keys.end(),
+                                   key
+                               )
+                               != p.defaulted_keys.end();
+                    };
+
+                    REQUIRE(has_key("build_number"));
+                    REQUIRE(has_key("license"));
+                    REQUIRE(has_key("timestamp"));
+                    REQUIRE(has_key("depends"));
+                    REQUIRE(has_key("constrains"));
+                }
+            }
+        );
+        REQUIRE(found);
+    }
 }

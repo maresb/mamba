@@ -175,6 +175,18 @@ namespace mamba::specs
                 out.name = head.value();  // There may be '-' in the name
             }
 
+            out.defaulted_keys = {
+                "build_number",
+                "license",
+                "timestamp",
+                "depends",
+                "constrains",
+                "track_features",
+                "size",
+                "md5",
+                "sha256",
+            };
+
             return out;
         }
 
@@ -215,12 +227,25 @@ namespace mamba::specs
                 return parse_url(url).transform(
                     [&](PackageInfo&& pkg) -> PackageInfo
                     {
+                        auto erase_defaulted = [&](const std::string& key)
+                        {
+                            auto it = std::find(
+                                pkg.defaulted_keys.begin(),
+                                pkg.defaulted_keys.end(),
+                                key
+                            );
+                            if (it != pkg.defaulted_keys.end())
+                            {
+                                pkg.defaulted_keys.erase(it);
+                            }
+                        };
                         if (util::starts_with(hash, "sha256:"))
                         {
                             hash = hash.substr(7);
                             if (hash.size() == 64 && is_hash(hash))
                             {
                                 pkg.sha256 = hash;
+                                erase_defaulted("sha256");
                             }
                         }
                         else if (is_hash(hash))
@@ -228,10 +253,12 @@ namespace mamba::specs
                             if (hash.size() == 32)
                             {
                                 pkg.md5 = hash;
+                                erase_defaulted("md5");
                             }
                             else if (hash.size() == 64)
                             {
                                 pkg.sha256 = hash;
+                                erase_defaulted("sha256");
                             }
                         }
                         return pkg;
