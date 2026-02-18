@@ -96,6 +96,22 @@ namespace mamba
                 }
             }
 
+            // Lockfile doesn't provide these fields; mark as stubs
+            package.info.defaulted_keys = {
+                "build_number",
+                "license",
+                "timestamp",
+                "track_features",
+                "size",
+            };
+            if (package.info.sha256.empty())
+            {
+                // Without sha256, the lockfile may have been generated during
+                // the v2.1.1-v2.4.0 corruption window; treat deps as unreliable
+                package.info.defaulted_keys.push_back("depends");
+                package.info.defaulted_keys.push_back("constrains");
+            }
+
             return package;
         }
 
