@@ -359,6 +359,19 @@ namespace mamba
                             }
                         }
                     }
+
+                    // Detect legacy cache corruption from v2.1.1-v2.4.0:
+                    // timestamp==0 AND license=="" is the corruption signature.
+                    // Applied last so it cannot be overridden by checksum validation.
+                    if (valid
+                        && repodata_record.value("timestamp", std::size_t(0)) == 0
+                        && repodata_record.value("license", std::string("")).empty())
+                    {
+                        LOG_WARNING << "Extracted package cache '" << extracted_dir.string()
+                                    << "' has corruption signature (timestamp=0, license=empty)"
+                                       ", invalidating to trigger re-extraction";
+                        valid = false;
+                    }
                 }
                 catch (const nlohmann::json::exception& e)
                 {
