@@ -14,6 +14,7 @@
 #include "mamba/core/environment.hpp"
 #include "mamba/core/virtual_packages.hpp"
 
+#include <cstdint>
 #include "termcolor/termcolor.hpp"
 
 #include <reproc++/run.hpp>

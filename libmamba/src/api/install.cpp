@@ -23,6 +23,7 @@
 #include "mamba/core/util.hpp"
 #include "mamba/core/virtual_packages.hpp"
 
+#include <cstdint>
 #include "termcolor/termcolor.hpp"
 
 #include "spdlog/spdlog.h"

@@ -15,6 +15,7 @@
 #include "mamba/core/match_spec.hpp"
 #include "mamba/core/thread_utils.hpp"
 
+#include <cstdint>
 #include "termcolor/termcolor.hpp"
 
 extern "C"

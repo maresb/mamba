@@ -16,7 +16,7 @@ ninja = "*"
 make = "*"
 # libmamba dependencies
 cpp-expected = "*"
-fmt = ">=12.0.0"
+fmt = ">=9,<11"
 libarchive = ">=3.8"
 libcurl = ">=7.86"
 libsodium = "*"
@@ -24,10 +24,10 @@ libsolv = ">=0.7.18"
 nlohmann_json = "*"
 reproc-cpp = ">=14.2.4.post0"
 simdjson = ">=3.3.0"
-spdlog = ">=1.16.0"
+spdlog = ">=1.11,<1.15"
 yaml-cpp = ">=0.8.0"
 # libmamba test dependencies
-catch2 = "*"
+gtest = "*"
 # micromamba dependencies
 cli11 = ">=2.2"
 # Python test dependencies
@@ -46,6 +46,8 @@ pybind11 = ">=3.0.0"
 # dev dependencies
 pre-commit = "*"
 ccache = "*"
+termcolor-cpp = ">=2.1.0,<3"
+cpp-filesystem = ">=1.5.12,<2"
 
 # ============================================================================
 # Tasks for building and testing
@@ -57,7 +59,7 @@ ccache = "*"
 # ============================================================================
 
 # Configure CMake build directory using the shared library preset
-configure = "cmake -B build -G Ninja --preset mamba-unix-shared-debug-dev"
+configure = "cmake -B build -G Ninja -DBUILD_LIBMAMBA=ON -DBUILD_SHARED=ON -DBUILD_LIBMAMBA_TESTS=ON -DBUILD_MICROMAMBA=ON -DCMAKE_BUILD_TYPE=Debug -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_CXX_FLAGS='-DFMT_HEADER_ONLY'"
 
 # Build all targets (runs configure first)
 build = { cmd = "cmake --build build -j", depends-on = ["configure"] }
