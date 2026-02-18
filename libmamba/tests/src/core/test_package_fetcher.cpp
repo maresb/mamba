@@ -338,6 +338,89 @@ namespace
         }
     }
 
+    TEST_CASE("legacy_corrupted_cache_invalidated")
+    {
+        // Principle 7: caches from v2.1.1-v2.4.0 may have corrupted metadata
+        // (timestamp=0, license=""). These should be invalidated.
+
+        auto& ctx = mambatests::context();
+        TemporaryDirectory temp_dir;
+        fs::u8path pkgs_dir = temp_dir.path() / "pkgs";
+        fs::create_directories(pkgs_dir);
+
+        auto pkg_info = specs::PackageInfo();
+        pkg_info.name = "corruptpkg";
+        pkg_info.version = "1.0";
+        pkg_info.build_string = "h0_0";
+        pkg_info.filename = "corruptpkg-1.0-h0_0.tar.bz2";
+        pkg_info.sha256 = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        pkg_info.channel = "https://conda.anaconda.org/conda-forge";
+        pkg_info.package_url = "https://conda.anaconda.org/conda-forge/linux-64/corruptpkg-1.0-h0_0.tar.bz2";
+
+        auto make_record = [&](std::size_t timestamp, const std::string& license) -> nlohmann::json
+        {
+            nlohmann::json record;
+            record["name"] = "corruptpkg";
+            record["version"] = "1.0";
+            record["build"] = "h0_0";
+            record["build_number"] = 0;
+            record["timestamp"] = timestamp;
+            record["license"] = license;
+            record["sha256"] = pkg_info.sha256;
+            record["url"] = pkg_info.package_url;
+            record["channel"] = pkg_info.channel;
+            record["subdir"] = "linux-64";
+            record["fn"] = pkg_info.filename;
+            record["depends"] = nlohmann::json::array();
+            record["constrains"] = nlohmann::json::array();
+            record["size"] = 0;
+            return record;
+        };
+
+        auto write_record_and_check = [&](const nlohmann::json& record) -> bool
+        {
+            auto extract_dir = pkgs_dir / "corruptpkg-1.0-h0_0";
+            auto info_dir = extract_dir / "info";
+            fs::create_directories(info_dir);
+
+            {
+                std::ofstream f((info_dir / "repodata_record.json").std_path());
+                f << record.dump(2);
+            }
+            {
+                std::ofstream paths_file((info_dir / "paths.json").std_path());
+                paths_file << R"({"paths": [], "paths_version": 1})";
+            }
+
+            PackageCacheData cache(pkgs_dir);
+            return cache.has_valid_extracted_dir(pkg_info, ctx.validation_params);
+        };
+
+        SECTION("corrupted: timestamp=0 AND license=empty → invalid")
+        {
+            auto record = make_record(0, "");
+            REQUIRE_FALSE(write_record_and_check(record));
+        }
+
+        SECTION("not corrupted: timestamp=0 AND license=MIT → valid")
+        {
+            auto record = make_record(0, "MIT");
+            REQUIRE(write_record_and_check(record));
+        }
+
+        SECTION("not corrupted: timestamp=1234 AND license=empty → valid")
+        {
+            auto record = make_record(1234567890, "");
+            REQUIRE(write_record_and_check(record));
+        }
+
+        SECTION("not corrupted: timestamp=1234 AND license=MIT → valid")
+        {
+            auto record = make_record(1234567890, "MIT");
+            REQUIRE(write_record_and_check(record));
+        }
+    }
+
     TEST_CASE("url_derived_stub_fields_yield_to_index_json")
     {
         // URL-derived PackageInfo has stub values for license, timestamp,
