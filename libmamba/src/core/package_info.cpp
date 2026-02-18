@@ -359,4 +359,14 @@ namespace mamba
         // TODO channel contains subdir right now?!
         return concat(channel, "::", name, "-", version, "-", build_string);
     }
+    nlohmann::json merge_repodata_record(const PackageInfo& pkg,
+                                         const nlohmann::json& index_json,
+                                         std::size_t /*tarball_size*/)
+    {
+        // Current (buggy) logic: PackageInfo always wins, index.json only backfills.
+        // This is a stub that replicates the existing write_repodata_record behavior.
+        nlohmann::json result = pkg.json_record();
+        result.insert(index_json.cbegin(), index_json.cend());
+        return result;
+    }
 }  // namespace mamba
