@@ -361,12 +361,51 @@ namespace mamba
     }
     nlohmann::json merge_repodata_record(const PackageInfo& pkg,
                                          const nlohmann::json& index_json,
-                                         std::size_t /*tarball_size*/)
+                                         std::size_t tarball_size)
     {
-        // Current (buggy) logic: PackageInfo always wins, index.json only backfills.
-        // This is a stub that replicates the existing write_repodata_record behavior.
-        nlohmann::json result = pkg.json_record();
-        result.insert(index_json.cbegin(), index_json.cend());
+        // Start with index.json as the base (package builder's metadata).
+        nlohmann::json result = index_json;
+
+        // Build the full PackageInfo JSON.
+        nlohmann::json pkg_json = pkg.json_record();
+
+        // Override index.json with authoritative fields from PackageInfo.
+        // Fields listed in defaulted_keys are stubs and must NOT override.
+        for (auto it = pkg_json.begin(); it != pkg_json.end(); ++it)
+        {
+            if (pkg.defaulted_keys.find(it.key()) == pkg.defaulted_keys.end())
+            {
+                result[it.key()] = it.value();
+            }
+        }
+
+        // Normalization (Principle 6):
+        // depends and constrains are always present as JSON arrays.
+        if (!result.contains("depends"))
+        {
+            result["depends"] = nlohmann::json::array();
+        }
+        if (!result.contains("constrains"))
+        {
+            result["constrains"] = nlohmann::json::array();
+        }
+
+        // track_features is omitted when empty.
+        if (result.contains("track_features") && result["track_features"].is_string()
+            && result["track_features"].get<std::string>().empty())
+        {
+            result.erase("track_features");
+        }
+
+        // size must be present and non-zero.
+        if (!result.contains("size") || result["size"] == 0)
+        {
+            if (tarball_size > 0)
+            {
+                result["size"] = tarball_size;
+            }
+        }
+
         return result;
     }
 }  // namespace mamba
