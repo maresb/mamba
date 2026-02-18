@@ -320,7 +320,6 @@ namespace mamba
         pool.create_whatprovides();
 
         // Now read the solvable back and construct PackageInfo from it
-        Pool* raw_pool = static_cast<Pool*>(pool);
         Solvable* s = nullptr;
         Id p_id;
         FOR_REPO_SOLVABLES(repo.repo(), p_id, s)
@@ -460,6 +459,39 @@ namespace mamba
         nlohmann::json missing_fields;
         EXPECT_FALSE(is_corrupted_cache_entry(missing_fields))
             << "Missing fields should not be treated as corruption";
+    }
+
+    // Test: Ensure build_string (authoritative) is kept while build_number (stub) yields
+    TEST(PackageInfoMerge, build_string_authoritative_build_number_stub)
+    {
+        PackageInfo pkg(std::string("build-test"));
+        pkg.version = "1.0";
+        pkg.build_string = "py39_2";  // authoritative (from URL)
+        pkg.build_number = 0;         // stub
+        pkg.channel = "conda-forge";
+        pkg.url = "https://example.com/build-test-1.0-py39_2.tar.bz2";
+        pkg.subdir = "linux-64";
+        pkg.fn = "build-test-1.0-py39_2.tar.bz2";
+
+        pkg.defaulted_keys = {"build_number", "license", "timestamp",
+                              "depends", "constrains", "track_features", "size"};
+
+        nlohmann::json index_json;
+        index_json["name"] = "build-test";
+        index_json["version"] = "1.0";
+        index_json["build"] = "py39_2";
+        index_json["build_number"] = 2;
+        index_json["license"] = "BSD";
+
+        nlohmann::json result = merge_repodata_record(pkg, index_json);
+
+        // build_string is authoritative (from URL), should be in result
+        EXPECT_EQ(result["build"], "py39_2");
+        EXPECT_EQ(result["build_string"], "py39_2");
+        // build_number is a stub, should come from index.json
+        EXPECT_EQ(result["build_number"], 2);
+        // license is a stub, should come from index.json
+        EXPECT_EQ(result["license"], "BSD");
     }
 
     TEST(PackageInfoCacheHealing, corrupted_cache_is_invalidated)
