@@ -9,6 +9,8 @@
 #include <string>
 
 #include "mamba/core/package_info.hpp"
+#include "mamba/core/pool.hpp"
+#include "mamba/core/repo.hpp"
 
 namespace mamba
 {
@@ -140,4 +142,208 @@ namespace mamba
         EXPECT_EQ(result["depends"], nlohmann::json::array());
         EXPECT_EQ(result["constrains"], nlohmann::json::array());
     }
+    // =========================================================================
+    // Principle 4 & 5: URL-derived packages going through the solver must
+    // have all non-URL-derivable fields marked as defaulted.
+    // Currently, only depends/constrains are marked; build_number, license,
+    // timestamp, track_features, and size are not.
+    // =========================================================================
+
+    TEST(PackageInfoDefaultedKeys, url_derived_via_solvable_marks_all_stubs)
+    {
+        // Simulate what happens when a URL-derived PackageInfo goes through
+        // the solver (PackageInfo -> MRepo -> libsolv -> PackageInfo(Solvable*)).
+        // The Solvable constructor should detect __explicit_specs__ repo and
+        // mark all non-URL-derivable fields as defaulted.
+        //
+        // We can't easily run a full solver round-trip in a unit test, but we
+        // can verify that the PackageInfo(Solvable*) constructor marks the
+        // right fields when the solvable comes from __explicit_specs__.
+        //
+        // For now, test the principle by checking that a URL-like PackageInfo
+        // constructed manually with the right defaulted_keys produces correct
+        // merge results.
+
+        PackageInfo pkg(std::string("url-pkg"));
+        pkg.version = "3.1";
+        pkg.build_string = "h5";
+        pkg.build_number = 0;     // stub from URL path
+        pkg.license = "";         // stub
+        pkg.timestamp = 0;        // stub
+        pkg.track_features = "";  // stub
+        pkg.size = 0;             // stub
+        pkg.depends = {};         // stub (no deps in URL)
+        pkg.constrains = {};      // stub
+        pkg.channel = "conda-forge";
+        pkg.url = "https://example.com/url-pkg-3.1-h5.tar.bz2";
+        pkg.subdir = "linux-64";
+        pkg.fn = "url-pkg-3.1-h5.tar.bz2";
+        pkg.md5 = "deadbeef";
+
+        // All non-URL-derivable fields should be in defaulted_keys
+        pkg.defaulted_keys = {"build_number", "license", "timestamp",
+                              "track_features", "size", "depends", "constrains"};
+
+        nlohmann::json index_json;
+        index_json["name"] = "url-pkg";
+        index_json["version"] = "3.1";
+        index_json["build"] = "h5";
+        index_json["build_number"] = 7;
+        index_json["license"] = "GPL-3.0";
+        index_json["timestamp"] = 1699999999;
+        index_json["depends"] = nlohmann::json::array({"libfoo >=2"});
+        index_json["track_features"] = "avx2";
+
+        nlohmann::json result = merge_repodata_record(pkg, index_json);
+
+        // All stub fields should come from index.json
+        EXPECT_EQ(result["build_number"], 7);
+        EXPECT_EQ(result["license"], "GPL-3.0");
+        EXPECT_EQ(result["timestamp"], 1699999999);
+        EXPECT_EQ(result["depends"], nlohmann::json::array({"libfoo >=2"}));
+        EXPECT_EQ(result["track_features"], "avx2");
+
+        // URL-derivable fields should come from PackageInfo
+        EXPECT_EQ(result["name"], "url-pkg");
+        EXPECT_EQ(result["version"], "3.1");
+        EXPECT_EQ(result["build_string"], "h5");
+        EXPECT_EQ(result["url"], pkg.url);
+        EXPECT_EQ(result["md5"], "deadbeef");
+    }
+
+    // =========================================================================
+    // Principle 6: Normalization at write boundary.
+    // =========================================================================
+
+    TEST(PackageInfoMerge, normalization_depends_constrains_always_arrays)
+    {
+        // When index.json lacks depends/constrains entirely (like nlohmann_json-abi),
+        // the result must still have them as empty arrays.
+        PackageInfo pkg(std::string("nodeps-pkg"));
+        pkg.version = "1.0";
+        pkg.build_string = "h0";
+        pkg.depends = {};
+        pkg.constrains = {};
+        // Solver-derived: depends/constrains are authoritative empty arrays
+        pkg.channel = "conda-forge";
+        pkg.url = "https://example.com/nodeps-pkg-1.0-h0.tar.bz2";
+        pkg.subdir = "linux-64";
+        pkg.fn = "nodeps-pkg-1.0-h0.tar.bz2";
+
+        nlohmann::json index_json;
+        index_json["name"] = "nodeps-pkg";
+        index_json["version"] = "1.0";
+        index_json["build"] = "h0";
+        // No depends/constrains in index.json at all
+
+        nlohmann::json result = merge_repodata_record(pkg, index_json);
+
+        EXPECT_TRUE(result.contains("depends"));
+        EXPECT_TRUE(result["depends"].is_array());
+        EXPECT_TRUE(result.contains("constrains"));
+        EXPECT_TRUE(result["constrains"].is_array());
+    }
+
+    TEST(PackageInfoMerge, normalization_empty_track_features_omitted)
+    {
+        PackageInfo pkg(std::string("simple-pkg"));
+        pkg.version = "1.0";
+        pkg.build_string = "h0";
+        pkg.track_features = "";  // empty
+        pkg.channel = "conda-forge";
+        pkg.url = "https://example.com/simple-pkg-1.0-h0.tar.bz2";
+        pkg.subdir = "linux-64";
+        pkg.fn = "simple-pkg-1.0-h0.tar.bz2";
+
+        nlohmann::json index_json;
+        index_json["name"] = "simple-pkg";
+        index_json["version"] = "1.0";
+        index_json["build"] = "h0";
+
+        nlohmann::json result = merge_repodata_record(pkg, index_json);
+
+        // Empty track_features should be omitted from result
+        EXPECT_FALSE(result.contains("track_features"));
+    }
+
+    TEST(PackageInfoMerge, normalization_size_from_tarball)
+    {
+        PackageInfo pkg(std::string("sized-pkg"));
+        pkg.version = "1.0";
+        pkg.build_string = "h0";
+        pkg.size = 0;  // unknown
+        pkg.channel = "conda-forge";
+        pkg.url = "https://example.com/sized-pkg-1.0-h0.tar.bz2";
+        pkg.subdir = "linux-64";
+        pkg.fn = "sized-pkg-1.0-h0.tar.bz2";
+
+        nlohmann::json index_json;
+        index_json["name"] = "sized-pkg";
+        index_json["version"] = "1.0";
+        index_json["build"] = "h0";
+
+        // Provide tarball_size as 3rd argument
+        nlohmann::json result = merge_repodata_record(pkg, index_json, 54321);
+
+        EXPECT_EQ(result["size"], 54321);
+    }
+
+    // =========================================================================
+    // Principle 5: Field trust must survive the solver round-trip.
+    // PackageInfo → MRepo → libsolv → PackageInfo(Solvable*)
+    // For URL-derived packages (__explicit_specs__), the Solvable constructor
+    // must detect the repo and mark non-URL-derivable fields as defaulted.
+    // =========================================================================
+
+    TEST(PackageInfoDefaultedKeys, solvable_roundtrip_explicit_specs_marks_stubs)
+    {
+        // Create a real libsolv pool and add a URL-derived package to it
+        MPool pool;
+        std::vector<PackageInfo> pkgs;
+        PackageInfo p(std::string("roundtrip-pkg"));
+        p.version = "1.0";
+        p.build_string = "py_0";
+        p.build_number = 0;
+        p.url = "https://conda.anaconda.org/conda-forge/linux-64/roundtrip-pkg-1.0-py_0.tar.bz2";
+        p.channel = "conda-forge";
+        p.subdir = "linux-64";
+        p.fn = "roundtrip-pkg-1.0-py_0.tar.bz2";
+        p.md5 = "abc123";
+        p.sha256 = "def456";
+        // Stub fields: build_number=0, license="", timestamp=0, depends=[], constrains=[]
+        pkgs.push_back(p);
+
+        MRepo repo(pool, "__explicit_specs__", pkgs);
+
+        pool.create_whatprovides();
+
+        // Now read the solvable back and construct PackageInfo from it
+        Pool* raw_pool = static_cast<Pool*>(pool);
+        Solvable* s = nullptr;
+        Id p_id;
+        FOR_REPO_SOLVABLES(repo.repo(), p_id, s)
+        {
+            break;  // get the first (and only) solvable
+        }
+        ASSERT_NE(s, nullptr);
+
+        PackageInfo recovered(s);
+
+        // Verify that non-URL-derivable fields are in defaulted_keys
+        EXPECT_TRUE(recovered.defaulted_keys.count("depends") > 0)
+            << "depends should be in defaulted_keys for __explicit_specs__";
+        EXPECT_TRUE(recovered.defaulted_keys.count("constrains") > 0)
+            << "constrains should be in defaulted_keys for __explicit_specs__";
+        EXPECT_TRUE(recovered.defaulted_keys.count("build_number") > 0)
+            << "build_number should be in defaulted_keys for __explicit_specs__";
+        EXPECT_TRUE(recovered.defaulted_keys.count("license") > 0)
+            << "license should be in defaulted_keys for __explicit_specs__";
+        EXPECT_TRUE(recovered.defaulted_keys.count("timestamp") > 0)
+            << "timestamp should be in defaulted_keys for __explicit_specs__";
+        EXPECT_TRUE(recovered.defaulted_keys.count("track_features") > 0)
+            << "track_features should be in defaulted_keys for __explicit_specs__";
+        EXPECT_TRUE(recovered.defaulted_keys.count("size") > 0)
+            << "size should be in defaulted_keys for __explicit_specs__";
+    }
+
 }  // namespace mamba
