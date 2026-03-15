@@ -150,6 +150,41 @@ construct(Configuration& config, const fs::u8path& prefix, bool extract_conda_pk
 
             if (!repodata_record.is_null())
             {
+                // Handle metadata for new extractions (both current and healing from
+                // v2.1.1-v2.3.3).
+                //
+                // Metadata handling logic:
+                // - URL-derived packages (current): defaulted_keys populated by from_url()
+                //   → Erase those keys, allowing index.json to provide correct values
+                //
+                // - Packages with stub signature (from v2.1.1-v2.3.3): defaulted_keys empty but
+                //   has timestamp==0 AND license=="" (the stub signature)
+                //   → Treat stub fields as defaulted, allowing index.json to replace them
+                //   → This handles both NEW extractions AND re-extractions during healing
+                //
+                // - Channel packages: defaulted_keys empty + real metadata (no stub signature)
+                //   → No fields erased, values from solver/repodata preserved correctly
+                //
+                // NOTE: Corrupted caches from v2.1.1-v2.3.3 are automatically healed by
+                // has_valid_extracted_dir() detecting corruption and invalidating the cache,
+                // triggering re-extraction. See issue #4095.
+                auto defaulted_keys = pkg_info.defaulted_keys;
+                if (defaulted_keys.empty() && repodata_record.contains("timestamp")
+                    && repodata_record["timestamp"] == 0 && repodata_record.contains("license")
+                    && repodata_record["license"] == "")
+                {
+                    // Stub signature detected - mark stub fields as defaulted
+                    defaulted_keys = { "build_number",   "license", "timestamp",
+                                       "track_features", "depends", "constrains" };
+                }
+
+                // Erase fields that were defaulted or have stub values
+                // This allows index.json to provide the correct values
+                for (const auto& key : defaulted_keys)
+                {
+                    repodata_record.erase(key);
+                }
+
                 // update values from index if there are any that are not part of the
                 // repodata_record.json yet
                 repodata_record.insert(index.cbegin(), index.cend());
