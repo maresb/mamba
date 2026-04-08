@@ -41,45 +41,120 @@ comment thread. Additional commits beyond what was requested:
 
 **Reply:**
 
-While doing a field-by-field audit of the defaulted_keys lists,
-I found that `subdir` was missing. For `file://` URLs the
-platform can't be parsed from the path, so `subdir` stays `""`.
-Without being listed in `defaulted_keys`, that empty string
-persists in `repodata_record.json` instead of being backfilled
-from `index.json`.
+While doing a field-by-field audit of the `defaulted_keys`
+lists, I found that `subdir` was missing. For `file://` URLs
+the platform can't be parsed from the path, so `subdir` stays
+`""`. Without being listed in `defaulted_keys`, that empty
+string persists in `repodata_record.json` instead of being
+backfilled from `index.json`.
 
-Fixed in `fix: add subdir to defaulted_keys when URL lacks platform`:
+Fixed in
+`fix: add subdir to defaulted_keys when URL lacks platform`:
 conda URLs now conditionally add `subdir` when `platform` is
-empty, and wheel/tar.gz URLs always include it (they never parse
-a platform). Verified via reproduction: explicit `file://` install
-of pyyaml now produces `"subdir": "noarch"` instead of
-`"subdir": ""`.
+empty, and wheel/tar.gz URLs always include it (they never
+parse a platform).
+
+I also added a reproduction script and posted the results on
+[issue #4095](https://github.com/mamba-org/mamba/issues/4095).
 
 ---
 
-## Addendum: top-level comment (reproduction results)
+## Addendum: comment on issue #4095
 
-**Post as:** top-level PR comment.
+**Post as:** comment on
+<https://github.com/mamba-org/mamba/issues/4095>.
 
-Reproduced issue #4095 with 2.6.0.rc0 using an explicit
-`file://` install of `pyyaml-6.0.3-pyh7db6752_0.conda` (no
-channel repodata available). The resulting
-`repodata_record.json` in 2.6.0.rc0 has:
+Reproduced and verified the fix across multiple versions.
+Here is a self-contained script that tests explicit `file://`
+installs (the buggy code path) and reports which
+`repodata_record.json` fields are correct:
+
+**ACTION:** Paste `cursor-context/reproduce_4095.py` inside a
+collapsible `<details>` block here.
+
+### Results across versions
+
+**2.1.0** (pre-regression baseline) — 2 failures:
 
 ```text
-license: ""          (should be "MIT")
-timestamp: 0         (should be 1758891992558)
-track_features: ""   (should be "pyyaml_no_compile")
-subdir: ""           (should be "noarch")
-constrains: absent   (should be [])
-md5: absent          (should be computed)
-sha256: absent       (should be computed)
+  PASS  license, timestamp, track_features, subdir, ...
+  FAIL  md5: "<absent>"  (expected non-empty value)
+  FAIL  sha256: "<absent>"  (expected non-empty value)
 ```
 
-With this branch, all fields are correct. The `subdir` fix
-required adding `subdir` to `defaulted_keys` when the URL
-lacks a platform path segment — found during the audit prompted
-by comment 6.
+Metadata is correct, but checksums are not computed from the
+tarball. This is the pre-existing gap before the regression.
+
+**2.1.1** (regression introduced by #3901) — 7 failures:
+
+```text
+  FAIL  license: ""  (expected "MIT")
+  FAIL  timestamp: 0  (expected 1758891992558)
+  FAIL  track_features: ""  (expected "pyyaml_no_compile")
+  FAIL  subdir: ""  (expected "noarch")
+  FAIL  depends: []  (expected ["python >=3.10.*", "yaml"])
+  FAIL  md5: "<absent>"  (expected non-empty value)
+  FAIL  sha256: "<absent>"  (expected non-empty value)
+```
+
+URL-derived stubs are now authoritative, clobbering all
+metadata including `depends`.
+
+**2.3.3** (partial fix by #4071) — 7 failures:
+
+```text
+  FAIL  license: ""  (expected "MIT")
+  FAIL  timestamp: 0  (expected 1758891992558)
+  FAIL  track_features: ""  (expected "pyyaml_no_compile")
+  FAIL  subdir: ""  (expected "noarch")
+  PASS  depends: ["python >=3.10.*", "yaml"]
+  FAIL  constrains: "<absent>"  (expected non-empty value)
+  FAIL  md5: "<absent>"  (expected non-empty value)
+  FAIL  sha256: "<absent>"  (expected non-empty value)
+```
+
+`depends` is now backfilled from `index.json`, but
+`constrains: []` is also erased (now absent). Other stub
+fields remain unchanged.
+
+**2.5.0 and 2.6.0.rc0** — same 7 failures as 2.3.3.
+
+**#4110 branch** — 0 failures:
+
+```text
+  PASS  license: "MIT"
+  PASS  timestamp: 1758891992558
+  PASS  track_features: "pyyaml_no_compile"
+  PASS  subdir: "noarch"
+  PASS  noarch: "python"
+  PASS  build_number: 0
+  PASS  depends: ["python >=3.10.*", "yaml"]
+  PASS  constrains: present
+  PASS  md5: present
+  PASS  sha256: present
+
+All checks passed.
+```
+
+Fix is in #4110.
+
+---
+
+## Addendum: top-level comment on PR #4110
+
+**Post as:** top-level comment on
+<https://github.com/mamba-org/mamba/pull/4110>.
+
+Reproduced issue #4095 on 2.6.0.rc0 and verified the fix.
+Posted a self-contained reproduction script and results on
+[the issue](https://github.com/mamba-org/mamba/issues/4095#issuecomment-FILL_IN).
+
+During the field-by-field audit prompted by comment 6, I also
+found and fixed a `subdir` bug: for `file://` URLs and
+wheel/tar.gz packages, `repodata_record.json` contained
+`subdir: ""` instead of the correct value from `index.json`
+(e.g. `"noarch"`). Fixed in
+`fix: add subdir to defaulted_keys when URL lacks platform`.
 
 ---
 
