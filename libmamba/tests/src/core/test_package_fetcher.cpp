@@ -15,6 +15,7 @@
 #include "mamba/core/package_handling.hpp"
 #include "mamba/core/util.hpp"
 #include "mamba/fs/filesystem.hpp"
+#include "mamba/util/url_manip.hpp"
 
 #include "mambatests.hpp"
 
@@ -594,7 +595,7 @@ namespace
 
         // file:// URL has no platform segment → subdir must be backfilled
         auto pkg_info = specs::PackageInfo::from_url(
-                            "file://" + (temp_dir.path() / "src" / pkg_filename).string()
+                            util::path_to_url((temp_dir.path() / "src" / pkg_filename).string())
         )
                             .value();
 
