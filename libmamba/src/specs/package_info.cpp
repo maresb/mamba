@@ -5,6 +5,7 @@
 // The full license is in the file LICENSE, distributed with this software.
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <tuple>
 #include <type_traits>
@@ -26,6 +27,19 @@ namespace mamba::specs
 {
     namespace
     {
+        constexpr auto conda_url_defaulted_keys = std::array{
+            defaulted_key::initialized, defaulted_key::build_number, defaulted_key::license,
+            defaulted_key::size,        defaulted_key::timestamp,    defaulted_key::track_features,
+            defaulted_key::depends,     defaulted_key::constrains,
+        };
+
+        constexpr auto wheel_targz_defaulted_keys = std::array{
+            defaulted_key::initialized,  defaulted_key::build,      defaulted_key::build_string,
+            defaulted_key::build_number, defaulted_key::license,    defaulted_key::size,
+            defaulted_key::subdir,       defaulted_key::timestamp,  defaulted_key::track_features,
+            defaulted_key::depends,      defaulted_key::constrains,
+        };
+
         auto parse_extension(std::string_view spec) -> PackageType
         {
             if (util::ends_with(spec, ".whl"))
@@ -98,16 +112,15 @@ namespace mamba::specs
                 // Name
                 out.name = head.value();  // There may be '-' in the name
 
-                // Mark fields that have stub/default values for URL-derived conda packages.
-                // These fields are NOT available from the URL and will use struct defaults.
-                // The "_initialized" sentinel enables fail-hard verification in
-                // write_repodata_record(). See issue #4095.
-                out.defaulted_keys = {
-                    defaulted_key::initialized,    defaulted_key::build_number,
-                    defaulted_key::license,        defaulted_key::timestamp,
-                    defaulted_key::track_features, defaulted_key::depends,
-                    defaulted_key::constrains,
-                };
+                // See `PackageInfo::defaulted_keys`. Issue #4095.
+                out.defaulted_keys.assign(
+                    conda_url_defaulted_keys.begin(),
+                    conda_url_defaulted_keys.end()
+                );
+                if (out.platform.empty())
+                {
+                    out.defaulted_keys.emplace_back(defaulted_key::subdir);
+                }
             }
             // PackageType::Wheel (.whl):
             // {pkg name}-{version}-{build tag (optional)}-{python tag}-{abi tag}-{platform tag}.whl
@@ -154,16 +167,11 @@ namespace mamba::specs
                     // The head is the name
                     out.name = head.value();  // There may be '-' in the name
 
-                    // Mark fields that have stub/default values for URL-derived wheel packages.
-                    // Wheels don't have build info in the filename, so add build/build_string.
-                    // The "_initialized" sentinel enables fail-hard verification. See issue #4095.
-                    out.defaulted_keys = {
-                        defaulted_key::initialized,    defaulted_key::build,
-                        defaulted_key::build_string,   defaulted_key::build_number,
-                        defaulted_key::license,        defaulted_key::timestamp,
-                        defaulted_key::track_features, defaulted_key::depends,
-                        defaulted_key::constrains,
-                    };
+                    // Wheels lack `build` info in filename. See issue #4095.
+                    out.defaulted_keys.assign(
+                        wheel_targz_defaulted_keys.begin(),
+                        wheel_targz_defaulted_keys.end()
+                    );
                 }
                 else
                 {
@@ -181,16 +189,11 @@ namespace mamba::specs
                     // Name
                     out.name = head.value();  // There may be '-' in the name
 
-                    // Mark fields that have stub/default values for URL-derived wheel packages.
-                    // Wheels don't have build info in the filename, so add build/build_string.
-                    // The "_initialized" sentinel enables fail-hard verification. See issue #4095.
-                    out.defaulted_keys = {
-                        defaulted_key::initialized,    defaulted_key::build,
-                        defaulted_key::build_string,   defaulted_key::build_number,
-                        defaulted_key::license,        defaulted_key::timestamp,
-                        defaulted_key::track_features, defaulted_key::depends,
-                        defaulted_key::constrains,
-                    };
+                    // Wheels lack `build` info in filename. See issue #4095.
+                    out.defaulted_keys.assign(
+                        wheel_targz_defaulted_keys.begin(),
+                        wheel_targz_defaulted_keys.end()
+                    );
                 }
             }
             // PackageType::TarGz (.tar.gz): {pkg name}-{version}.tar.gz
@@ -209,15 +212,11 @@ namespace mamba::specs
                 // Name
                 out.name = head.value();  // There may be '-' in the name
 
-                // Mark fields that have stub/default values for URL-derived tar.gz packages.
-                // Similar to wheels: no build info in filename. See issue #4095.
-                out.defaulted_keys = {
-                    defaulted_key::initialized,    defaulted_key::build,
-                    defaulted_key::build_string,   defaulted_key::build_number,
-                    defaulted_key::license,        defaulted_key::timestamp,
-                    defaulted_key::track_features, defaulted_key::depends,
-                    defaulted_key::constrains,
-                };
+                // Like wheels: no `build` info in filename. See issue #4095.
+                out.defaulted_keys.assign(
+                    wheel_targz_defaulted_keys.begin(),
+                    wheel_targz_defaulted_keys.end()
+                );
             }
 
             return out;
@@ -299,28 +298,27 @@ namespace mamba::specs
                 has_egg_name = true;
             }
 
-            // Mark fields that have stub/default values for git URL packages.
-            // Git URLs only provide package_url and optionally name (from #egg=).
-            // All other fields use struct defaults. See issue #4095.
+            // Git URLs only provide `package_url` and optionally name
+            // (via `#egg=`). See issue #4095.
             pkg.defaulted_keys = {
-                defaulted_key::initialized,
-                defaulted_key::version,
-                defaulted_key::channel,
-                defaulted_key::subdir,
-                defaulted_key::fn,
-                defaulted_key::build,
-                defaulted_key::build_string,
-                defaulted_key::build_number,
-                defaulted_key::license,
-                defaulted_key::timestamp,
-                defaulted_key::track_features,
-                defaulted_key::depends,
-                defaulted_key::constrains,
+                std::string(defaulted_key::initialized),
+                std::string(defaulted_key::version),
+                std::string(defaulted_key::channel),
+                std::string(defaulted_key::subdir),
+                std::string(defaulted_key::fn),
+                std::string(defaulted_key::build),
+                std::string(defaulted_key::build_string),
+                std::string(defaulted_key::build_number),
+                std::string(defaulted_key::license),
+                std::string(defaulted_key::size),
+                std::string(defaulted_key::timestamp),
+                std::string(defaulted_key::track_features),
+                std::string(defaulted_key::depends),
+                std::string(defaulted_key::constrains),
             };
-            // If #egg= is absent, name is also defaulted (empty string)
             if (!has_egg_name)
             {
-                pkg.defaulted_keys.push_back(defaulted_key::name);
+                pkg.defaulted_keys.emplace_back(defaulted_key::name);
             }
             return pkg;
         }

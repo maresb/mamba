@@ -521,15 +521,13 @@ namespace solv
 
     auto ObjSolvableViewConst::defaulted_keys() const -> std::vector<std::string>
     {
-        // Retrieve the comma-separated string from SOLVABLE_KEYWORDS
-        // (repurposed for conda-specific metadata since it's not used in the conda ecosystem)
+        // `SOLVABLE_KEYWORDS` repurposed for conda-specific `defaulted_keys` storage.
         const char* str = ::solvable_lookup_str(const_cast<::Solvable*>(raw()), SOLVABLE_KEYWORDS);
         if (str == nullptr || str[0] == '\0')
         {
             return {};
         }
 
-        // Parse comma-separated values into vector
         std::vector<std::string> result;
         std::string current;
         for (const char* p = str; *p != '\0'; ++p)
@@ -556,6 +554,11 @@ namespace solv
 
     void ObjSolvableView::set_defaulted_keys(const std::vector<std::string>& keys) const
     {
+        // Exclusive-ownership assumption: `SOLVABLE_KEYWORDS` is entirely owned by
+        // `defaulted_keys`. The plain comma-separated encoding has no namespace prefix,
+        // so other data cannot coexist in this field without a format change.
+        // `SOLVABLE_KEYWORDS` is unused in the conda ecosystem (libsolv maps it from
+        // RPM's Keywords tag, which has no conda equivalent), so collision risk is nil.
         if (keys.empty())
         {
             // Store empty string for empty list (libsolv's unset behavior is unreliable)
@@ -563,7 +566,6 @@ namespace solv
             return;
         }
 
-        // Serialize as comma-separated string
         std::string serialized;
         for (std::size_t i = 0; i < keys.size(); ++i)
         {

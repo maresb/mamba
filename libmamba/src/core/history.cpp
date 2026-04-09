@@ -377,23 +377,23 @@ namespace mamba
 
         specs::PackageInfo pkg_info{ name, version, build_string, channel };
 
-        // Mark fields that have stub/default values for history-derived packages.
         // History only provides name, version, build, channel.
-        // Other fields (subdir, license, etc) should be backfilled from index.json (from tarball)
-        // if possible. See issue #4095.
+        // Other fields should be backfilled from `index.json` if possible.
+        // See issue #4095.
         pkg_info.defaulted_keys = {
-            specs::defaulted_key::initialized,
-            specs::defaulted_key::build_number,
-            specs::defaulted_key::license,
-            specs::defaulted_key::timestamp,
-            specs::defaulted_key::track_features,
-            specs::defaulted_key::depends,
-            specs::defaulted_key::constrains,
-            specs::defaulted_key::subdir,
-            specs::defaulted_key::md5,
-            specs::defaulted_key::sha256,
-            specs::defaulted_key::size,
-            specs::defaulted_key::fn,
+            std::string(specs::defaulted_key::initialized),
+            std::string(specs::defaulted_key::build_number),
+            std::string(specs::defaulted_key::license),
+            std::string(specs::defaulted_key::timestamp),
+            std::string(specs::defaulted_key::track_features),
+            std::string(specs::defaulted_key::depends),
+            std::string(specs::defaulted_key::constrains),
+            std::string(specs::defaulted_key::subdir),
+            std::string(specs::defaulted_key::md5),
+            std::string(specs::defaulted_key::sha256),
+            std::string(specs::defaulted_key::size),
+            std::string(specs::defaulted_key::fn),
+            std::string(specs::defaulted_key::url),
         };
 
         return pkg_info;

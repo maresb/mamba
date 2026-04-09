@@ -15,6 +15,7 @@
 #include "mamba/core/package_handling.hpp"
 #include "mamba/core/util.hpp"
 #include "mamba/fs/filesystem.hpp"
+#include "mamba/util/url_manip.hpp"
 
 #include "mambatests.hpp"
 
@@ -575,6 +576,111 @@ namespace
     }
 
     /**
+     * Comprehensive test for URL-derived repodata_record.json correctness.
+     *
+     * Uses a file:// URL (which lacks a platform path segment) to exercise
+     * the worst case: subdir is empty and must be backfilled from index.json.
+     * Verifies every metadata field against expected values.
+     *
+     * This is the C++ equivalent of reproduce_4095.py.
+     */
+    TEST_CASE("PackageFetcher::write_repodata_record comprehensive URL-derived fields")
+    {
+        auto& ctx = mambatests::context();
+        TemporaryDirectory temp_dir;
+        MultiPackageCache package_caches{ { temp_dir.path() / "pkgs" }, ctx.validation_params };
+
+        const std::string pkg_basename = "test-pkg-1.0-h123456_0";
+        const std::string pkg_filename = pkg_basename + ".tar.bz2";
+
+        // file:// URL has no platform segment → subdir must be backfilled
+        auto pkg_info = specs::PackageInfo::from_url(
+                            util::path_to_url((temp_dir.path() / "src" / pkg_filename).string())
+        )
+                            .value();
+
+        REQUIRE(pkg_info.platform.empty());
+
+        const auto cache_subdir = temp_dir.path() / "pkgs"
+                                  / package_cache_folder_relative_path(pkg_info);
+        auto pkg_extract_dir = cache_subdir / pkg_basename;
+        auto info_dir = pkg_extract_dir / "info";
+        fs::create_directories(info_dir);
+
+        nlohmann::json index_json;
+        index_json["name"] = "test-pkg";
+        index_json["version"] = "1.0";
+        index_json["build"] = "h123456_0";
+        index_json["build_number"] = 42;
+        index_json["license"] = "BSD-3-Clause";
+        index_json["timestamp"] = 9876543210;
+        index_json["subdir"] = "linux-64";
+        index_json["noarch"] = "python";
+        index_json["depends"] = nlohmann::json::array({ "python >=3.8", "yaml" });
+        index_json["constrains"] = nlohmann::json::array({ "otherpkg >=2.0" });
+        index_json["track_features"] = "some_feature";
+
+        {
+            std::ofstream f((info_dir / "index.json").std_path());
+            f << index_json.dump(2);
+        }
+        {
+            std::ofstream f((info_dir / "paths.json").std_path());
+            f << R"({"paths": [], "paths_version": 1})";
+        }
+
+        auto tarball_path = cache_subdir / pkg_filename;
+        create_archive(pkg_extract_dir, tarball_path, compression_algorithm::bzip2, 1, 1, nullptr);
+        REQUIRE(fs::exists(tarball_path));
+
+        auto modified_pkg_info = pkg_info;
+        modified_pkg_info.filename = pkg_filename;
+
+        fs::remove_all(pkg_extract_dir);
+
+        PackageFetcher pkg_fetcher{ modified_pkg_info, package_caches };
+        REQUIRE(pkg_fetcher.extract(
+            { .sparse = false, .subproc_mode = extract_subproc_mode::mamba_package }
+        ));
+
+        auto rr_path = pkg_extract_dir / "info" / "repodata_record.json";
+        REQUIRE(fs::exists(rr_path));
+
+        std::ifstream rr_file(rr_path.std_path());
+        nlohmann::json rr;
+        rr_file >> rr;
+
+        // Fields from URL (should be preserved as-is)
+        CHECK(rr["name"] == "test-pkg");
+        CHECK(rr["version"] == "1.0");
+        CHECK(rr["build"] == "h123456_0");
+        CHECK(rr["build_string"] == "h123456_0");
+        CHECK(rr["fn"] == pkg_filename);
+        CHECK_FALSE(rr["url"].get<std::string>().empty());
+
+        // Fields backfilled from index.json (the core issue #4095 fix)
+        CHECK(rr["license"] == "BSD-3-Clause");
+        CHECK(rr["build_number"] == 42);
+        CHECK(rr["timestamp"] == 9876543210);
+        CHECK(rr["subdir"] == "linux-64");
+        CHECK(rr["noarch"] == "python");
+        CHECK(rr["depends"] == nlohmann::json::array({ "python >=3.8", "yaml" }));
+        CHECK(rr["constrains"] == nlohmann::json::array({ "otherpkg >=2.0" }));
+        CHECK(rr["track_features"] == "some_feature");
+
+        // Checksums computed from tarball
+        CHECK(rr.contains("md5"));
+        CHECK(rr["md5"].is_string());
+        CHECK_FALSE(rr["md5"].get<std::string>().empty());
+        CHECK(rr.contains("sha256"));
+        CHECK(rr["sha256"].is_string());
+        CHECK_FALSE(rr["sha256"].get<std::string>().empty());
+
+        // Size from tarball
+        CHECK(rr["size"] > 0);
+    }
+
+    /**
      * Test that channel patches with intentionally empty depends are preserved
      *
      * PURPOSE: Verify that when a channel repodata patch sets depends=[] to fix
@@ -606,9 +712,7 @@ namespace
         pkg_info.build_string = "h123456_0";
         pkg_info.filename = "patched-pkg-1.0-h123456_0.tar.bz2";
         pkg_info.dependencies = {};  // Intentionally empty from channel patch
-        pkg_info.defaulted_keys = { specs::defaulted_key::initialized };  // Only sentinel =
-                                                                          // solver-derived, trust
-                                                                          // all
+        pkg_info.defaulted_keys = { std::string(specs::defaulted_key::initialized) };
         pkg_info.timestamp = 1234567890;  // Non-zero = proves not URL-derived stub
 
         const std::string pkg_basename = "patched-pkg-1.0-h123456_0";
@@ -690,9 +794,7 @@ namespace
         pkg_info.build_string = "h123456_0";
         pkg_info.filename = "patched-constrains-pkg-1.0-h123456_0.tar.bz2";
         pkg_info.constrains = {};  // Intentionally empty from channel patch
-        pkg_info.defaulted_keys = { specs::defaulted_key::initialized };  // Only sentinel =
-                                                                          // solver-derived, trust
-                                                                          // all
+        pkg_info.defaulted_keys = { std::string(specs::defaulted_key::initialized) };
         pkg_info.timestamp = 1234567890;  // Non-zero = proves not URL-derived stub
 
         const std::string pkg_basename = "patched-constrains-pkg-1.0-h123456_0";
@@ -778,8 +880,8 @@ namespace
         pkg_info.build_string = "h0_0";
         pkg_info.filename = "missing-init-pkg-1.0-h0_0.tar.bz2";
         // Deliberately NOT setting _initialized in defaulted_keys
-        pkg_info.defaulted_keys = { specs::defaulted_key::license,
-                                    specs::defaulted_key::timestamp };  // Missing initialized!
+        pkg_info.defaulted_keys = { std::string(specs::defaulted_key::license),
+                                    std::string(specs::defaulted_key::timestamp) };
 
         const std::string pkg_basename = "missing-init-pkg-1.0-h0_0";
 

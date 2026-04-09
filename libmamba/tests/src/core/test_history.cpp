@@ -133,7 +133,7 @@ namespace mamba
             std::string s = "conda-forge::pkg-1.0-bld_0";
             specs::PackageInfo pkg = mamba::read_history_url_entry(s);
 
-            auto contains = [](const std::vector<std::string>& v, const std::string& val)
+            auto contains = [](const std::vector<std::string>& v, std::string_view val)
             { return std::find(v.begin(), v.end(), val) != v.end(); };
 
             REQUIRE_FALSE(pkg.defaulted_keys.empty());
@@ -147,6 +147,7 @@ namespace mamba
             REQUIRE(contains(pkg.defaulted_keys, specs::defaulted_key::sha256));
             REQUIRE(contains(pkg.defaulted_keys, specs::defaulted_key::size));
             REQUIRE(contains(pkg.defaulted_keys, specs::defaulted_key::fn));
+            REQUIRE(contains(pkg.defaulted_keys, specs::defaulted_key::url));
         }
 
         TEST_CASE("revision_diff")
