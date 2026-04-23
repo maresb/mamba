@@ -7,6 +7,7 @@
 #ifndef MAMBA_CORE_SHARDS_HPP
 #define MAMBA_CORE_SHARDS_HPP
 
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -15,22 +16,27 @@
 #include "mamba/core/error_handling.hpp"
 #include "mamba/core/shard_types.hpp"
 #include "mamba/core/subdir_index.hpp"
+#include "mamba/core/thread_utils.hpp"
 #include "mamba/download/downloader.hpp"
 #include "mamba/download/parameters.hpp"
 #include "mamba/fs/filesystem.hpp"
 #include "mamba/specs/authentication_info.hpp"
 #include "mamba/specs/channel.hpp"
+#include "mamba/specs/version.hpp"
 
 namespace mamba
 {
-    // Forward declaration
-    class TemporaryFile;
-
     /**
      * Handle repodata_shards.msgpack.zst and individual per-package shards.
      *
      * This class manages fetching and caching of individual shards from
      * a sharded repodata index.
+     *
+     * **Python minor prefilter:** When constructed with ``python_minor_version_for_prefilter``
+     * (e.g. 3.12), parsing a shard msgpack drops package records whose ``depends`` list constrains
+     * ``python`` to a range that does not contain that minor, reducing work for the solver.
+     * When that optional is unset, no such filtering is applied and all records in the shard
+     * are parsed (python compatibility is left to the solver).
      */
     class Shards
     {
@@ -45,6 +51,12 @@ namespace mamba
          * @param auth_info Authentication information.
          * @param remote_fetch_params Remote fetch parameters.
          * @param download_threads Number of threads to use for parallel shard fetching.
+         * @param mirrors Optional base mirrors for channel-based downloads. When provided,
+         *        extend_mirrors in fetch_shards will be initialized from these before adding
+         *        absolute-URL mirrors.
+         * @param python_minor_version_for_prefilter If set, shard parsing filters out records whose
+         *        ``depends`` python constraints are incompatible with this minor; if unset,
+         *        no python-minor-based record filtering is performed.
          */
         Shards(
             ShardsIndexDict shards_index,
@@ -52,7 +64,10 @@ namespace mamba
             specs::Channel channel,
             specs::AuthenticationDataBase auth_info,
             download::RemoteFetchParams remote_fetch_params,
-            std::size_t download_threads = 10
+            // 0 means: auto; value is normalized with normalize_to_affinity_concurrency().
+            std::size_t download_threads = 0,
+            std::optional<std::reference_wrapper<const download::mirror_map>> mirrors = std::nullopt,
+            std::optional<specs::Version> python_minor_version_for_prefilter = std::nullopt
         );
 
         /** Return the names of all packages available in this shard collection. */
@@ -89,6 +104,9 @@ namespace mamba
         /** Get the URL of this shard collection. */
         [[nodiscard]] auto url() const -> std::string;
 
+        /** Get the subdir (platform) from the shard index. */
+        [[nodiscard]] auto subdir() const -> const std::string&;
+
     private:
 
         /** Shard index data. */
@@ -109,16 +127,49 @@ namespace mamba
         /** Number of threads to use for parallel shard fetching. */
         std::size_t m_download_threads;
 
+        /** Optional base mirrors for channel-based downloads. */
+        std::optional<std::reference_wrapper<const download::mirror_map>> m_mirrors;
+
+        /**
+         * Environment python minor used when parsing shards to prefilter package records
+         * (see ``record_depends_on_python_minor_version_for_prefilter`` in shards.cpp).
+         * Empty means the prefilter is disabled.
+         */
+        std::optional<specs::Version> m_python_minor_version_for_prefilter;
+
         /** Visited shards, keyed by package name. */
         std::map<std::string, ShardDict> m_visited;
 
         /** Cached shards_base_url. */
         mutable std::optional<std::string> m_shards_base_url;
 
+        /** Cached resolved base_url for packages. */
+        mutable std::optional<std::string> m_base_url_cache;
+
+        /** Root directory of the writable packages cache (e.g. first writable pkgs_dir). */
+        fs::u8path m_pkgs_cache_root;
+
+        /** Directory for cached shard files: {pkgs_cache_root}/cache/shards */
+        fs::u8path m_shard_cache_dir;
+
         /**
          * Get the base URL where shards are stored.
          */
         [[nodiscard]] auto shards_base_url() const -> std::string;
+
+        /**
+         * Get the root directory used for shard caching.
+         *
+         * When constructed with an explicit cache root, that path is used.
+         * Otherwise, this falls back to an environment-based default using
+         * XDG_CACHE_HOME or util::user_cache_dir().
+         */
+        [[nodiscard]] auto pkgs_cache_root() const -> fs::u8path;
+
+        /**
+         * Get the shard cache directory: {pkgs_cache_root}/cache/shards
+         */
+        [[nodiscard]] auto shard_cache_dir() const -> const fs::u8path&;
 
         /**
          * Get the relative path for a shard (for use with download::Request).
@@ -146,16 +197,15 @@ namespace mamba
 
         /**
          * Create download requests for shards with proper mirror handling.
+         * Downloads go directly to the shard cache path.
          */
         void create_download_requests(
             const std::map<std::string, std::string>& url_to_package,
-            const std::string& cache_dir_str,
             download::mirror_map& extended_mirrors,
             download::MultiRequest& requests,
             std::vector<std::string>& cache_miss_urls,
             std::vector<std::string>& cache_miss_packages,
-            std::map<std::string, fs::u8path>& package_to_artifact_path,
-            std::vector<std::shared_ptr<TemporaryFile>>& artifacts
+            std::map<std::string, fs::u8path>& package_to_cache_path
         ) const;
 
         /**
@@ -164,21 +214,44 @@ namespace mamba
         auto process_downloaded_shard(
             const std::string& package,
             const download::Success& success,
-            const std::map<std::string, fs::u8path>& package_to_artifact_path
+            const std::map<std::string, fs::u8path>& package_to_cache_path
         ) -> expected_t<ShardDict>;
 
         /**
          * Decompress zstd compressed shard data.
          */
-        auto decompress_zstd_shard(const std::vector<std::uint8_t>& compressed_data)
+        auto decompress_zstd_shard(const std::vector<std::uint8_t>& compressed_data) const
             -> expected_t<std::vector<std::uint8_t>>;
 
         /**
          * Parse msgpack data into ShardDict.
          */
-        auto
-        parse_shard_msgpack(const std::vector<std::uint8_t>& decompressed_data, const std::string& package)
+        auto parse_shard_msgpack(const std::vector<std::uint8_t>& decompressed_data) const
             -> expected_t<ShardDict>;
+
+        /**
+         * Get the cache path for a shard file.
+         * Returns path: {cache_dir}/cache/shards/{hex_hash}.msgpack.zst
+         */
+        [[nodiscard]] auto shard_cache_path(const std::string& package) const -> fs::u8path;
+
+        /**
+         * Check if a shard is cached and valid (matches expected hash).
+         */
+        [[nodiscard]] auto is_shard_cached(const std::string& package) const -> bool;
+
+        /**
+         * Load and parse a shard from cache.
+         */
+        auto load_shard_from_cache(const std::string& package) const -> expected_t<ShardDict>;
+
+        /** For unit testing. */
+        friend auto test_process_downloaded_shard(
+            Shards& shards,
+            const std::string& package,
+            const download::Success& success,
+            const std::map<std::string, fs::u8path>& package_to_cache_path
+        ) -> expected_t<ShardDict>;
     };
 
 }

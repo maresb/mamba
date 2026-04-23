@@ -22,7 +22,10 @@
 #include "mamba/solver/libsolv/database.hpp"
 #include "mamba/specs/conda_url.hpp"
 #include "mamba/specs/package_info.hpp"
+#include "mamba/specs/version.hpp"
 #include "mamba/util/string.hpp"
+
+#include "transaction_context.hpp"
 
 namespace mamba
 {
@@ -229,7 +232,18 @@ namespace mamba
                                 .value();
             database.for_each_package_matching(
                 ms,
-                [&](specs::PackageInfo&& pkg) { g.add_node(std::move(pkg)); }
+                [&](specs::PackageInfo&& pkg)
+                {
+                    if (pkg.name == "python")
+                    {
+                        if (auto effective = effective_python_site_packages_path(pkg);
+                            !effective.empty())
+                        {
+                            pkg.python_site_packages_path = std::move(effective);
+                        }
+                    }
+                    g.add_node(std::move(pkg));
+                }
             );
         }
 
@@ -294,6 +308,17 @@ namespace mamba
     namespace
     {
         /**
+         * Compare two version strings using proper version comparison.
+         * Returns true if lhs < rhs according to version ordering.
+         */
+        auto compare_versions(std::string_view lhs, std::string_view rhs) -> bool
+        {
+            auto lhs_version = specs::Version::parse(lhs).value_or(specs::Version());
+            auto rhs_version = specs::Version::parse(rhs).value_or(specs::Version());
+            return lhs_version < rhs_version;
+        }
+
+        /**
          * Prints metadata for a given package.
          */
         auto print_metadata(std::ostream& out, const specs::PackageInfo& pkg)
@@ -355,10 +380,11 @@ namespace mamba
         /**
          * Prints all other versions/builds in a table format for a given package.
          */
+        template <typename MapType>
         auto print_other_builds(
             std::ostream& out,
             const specs::PackageInfo&,
-            const std::map<std::string, std::vector<specs::PackageInfo>> groupedOtherBuilds,
+            const MapType& groupedOtherBuilds,
             bool showAllBuilds
         )
         {
@@ -509,7 +535,16 @@ namespace mamba
     auto QueryResult::sort(std::string_view field) -> QueryResult&
     {
         auto compare_ids = [&](node_id lhs, node_id rhs)
-        { return m_dep_graph.node(lhs).field(field) < m_dep_graph.node(rhs).field(field); };
+        {
+            auto lhs_field = m_dep_graph.node(lhs).field(field);
+            auto rhs_field = m_dep_graph.node(rhs).field(field);
+            // Use proper version comparison for version field
+            if (field == "version")
+            {
+                return compare_versions(lhs_field, rhs_field);
+            }
+            return lhs_field < rhs_field;
+        };
 
         if (!m_ordered_pkg_id_list.empty())
         {
@@ -696,8 +731,11 @@ namespace mamba
 
         if (!m_ordered_pkg_id_list.empty())
         {
-            std::map<std::string, std::map<std::string, std::vector<specs::PackageInfo>>>
-                packageBuildsByVersion;
+            // Use custom comparator for version map to ensure proper version ordering
+            auto version_compare = [](const std::string& lhs, const std::string& rhs)
+            { return compare_versions(lhs, rhs); };
+            using VersionMap = std::map<std::string, std::vector<specs::PackageInfo>, decltype(version_compare)>;
+            std::map<std::string, VersionMap> packageBuildsByVersion;
             std::unordered_set<std::string> distinctBuildSHAs;
             for (auto& entry : m_ordered_pkg_id_list)
             {
@@ -706,16 +744,33 @@ namespace mamba
                     auto package = m_dep_graph.node(id);
                     if (distinctBuildSHAs.insert(package.sha256).second)
                     {
-                        packageBuildsByVersion[package.name][package.version].push_back(package);
+                        // Ensure the version map is initialized with the comparator
+                        auto name_it = packageBuildsByVersion.find(package.name);
+                        if (name_it == packageBuildsByVersion.end())
+                        {
+                            name_it = packageBuildsByVersion
+                                          .emplace(package.name, VersionMap(version_compare))
+                                          .first;
+                        }
+                        name_it->second[package.version].push_back(package);
                     }
                 }
             }
 
-            for (const auto& entry : packageBuildsByVersion)
+            for (auto& entry : packageBuildsByVersion)
             {
                 // We want the newest version to be on top, therefore we iterate in reverse.
                 for (auto it = entry.second.rbegin(); it != entry.second.rend(); ++it)
                 {
+                    // Sort packages within each version by build number (descending)
+                    std::sort(
+                        it->second.begin(),
+                        it->second.end(),
+                        [](const specs::PackageInfo& lhs, const specs::PackageInfo& rhs)
+                        {
+                            return lhs.build_number > rhs.build_number;  // Descending order
+                        }
+                    );
                     printer.add_row(format_row(it->second[0], it->second));
                 }
             }
@@ -871,16 +926,46 @@ namespace mamba
         j["result"] = { { "msg", msg }, { "status", "OK" } };
 
         j["result"]["pkgs"] = nlohmann::json::array();
-        for (auto id : m_pkg_id_list)
+
+        if (!m_ordered_pkg_id_list.empty())
         {
-            nlohmann::json pkg_info_json = m_dep_graph.node(id);
-            // We want the canonical channel name here.
-            // We do not know what is in the `channel` field so we need to make sure.
-            // This is most likely legacy and should be updated on the next major release.
-            pkg_info_json["channel"] = cut_subdir(
-                cut_repo_name(pkg_info_json["channel"].get<std::string_view>())
-            );
-            j["result"]["pkgs"].push_back(std::move(pkg_info_json));
+            // When groupby has been called, sort packages by version and build number
+            std::vector<specs::PackageInfo> sorted_packages;
+            for (auto& entry : m_ordered_pkg_id_list)
+            {
+                for (const auto& id : entry.second)
+                {
+                    sorted_packages.push_back(m_dep_graph.node(id));
+                }
+            }
+            // Sort by version (descending), then by build number (descending)
+            sort_packages_by_version_and_build_desc(sorted_packages);
+
+            for (const auto& package : sorted_packages)
+            {
+                nlohmann::json pkg_info_json = package;
+                // We want the canonical channel name here.
+                // We do not know what is in the `channel` field so we need to make sure.
+                // This is most likely legacy and should be updated on the next major release.
+                pkg_info_json["channel"] = cut_subdir(
+                    cut_repo_name(pkg_info_json["channel"].get<std::string_view>())
+                );
+                j["result"]["pkgs"].push_back(std::move(pkg_info_json));
+            }
+        }
+        else
+        {
+            for (auto id : m_pkg_id_list)
+            {
+                nlohmann::json pkg_info_json = m_dep_graph.node(id);
+                // We want the canonical channel name here.
+                // We do not know what is in the `channel` field so we need to make sure.
+                // This is most likely legacy and should be updated on the next major release.
+                pkg_info_json["channel"] = cut_subdir(
+                    cut_repo_name(pkg_info_json["channel"].get<std::string_view>())
+                );
+                j["result"]["pkgs"].push_back(std::move(pkg_info_json));
+            }
         }
 
         if (m_type != QueryType::Search && !m_pkg_id_list.empty())
@@ -920,8 +1005,12 @@ namespace mamba
                 packages[package.name].push_back(package);
             }
 
-            for (const auto& entry : packages)
+            for (auto& entry : packages)
             {
+                // Sort packages by version (descending) and build number (descending)
+                // so that the latest version is first
+                sort_packages_by_version_and_build_desc(entry.second);
+
                 print_solvable(
                     out,
                     entry.second[0],

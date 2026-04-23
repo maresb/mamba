@@ -4,11 +4,14 @@
 //
 // The full license is in the file LICENSE, distributed with this software.
 
+#include <chrono>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <optional>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 #include <fmt/format.h>
@@ -16,6 +19,7 @@
 #include <msgpack/zone.h>
 #include <zstd.h>
 
+#include "mamba/core/context.hpp"
 #include "mamba/core/error_handling.hpp"
 #include "mamba/core/logging.hpp"
 #include "mamba/core/output.hpp"
@@ -30,6 +34,12 @@
 
 namespace
 {
+    auto done_with_duration(std::chrono::steady_clock::duration elapsed) -> std::string
+    {
+        const double seconds = std::chrono::duration<double>(elapsed).count();
+        return fmt::format("✔ Done ({:.1f} sec)", seconds);
+    }
+
     /**
      * Parse the "shards" map from msgpack (package name -> hash bytes).
      */
@@ -284,6 +294,23 @@ namespace
 
 namespace mamba
 {
+    std::optional<std::int64_t>
+    shard_index_cache_age_seconds(const fs::u8path& cache_path, std::string_view subdir_name)
+    {
+        std::error_code ec;
+        const fs::file_time_type last_write = fs::last_write_time(cache_path, ec);
+        if (ec)
+        {
+            LOG_DEBUG << "Could not check shard index cache age for " << subdir_name << ": "
+                      << ec.message();
+            return std::nullopt;
+        }
+        const fs::file_time_type now = fs::file_time_type::clock::now();
+        const std::int64_t age_sec = std::chrono::duration_cast<std::chrono::seconds>(now - last_write)
+                                         .count();
+        return age_sec;
+    }
+
     auto ShardIndexLoader::shard_index_cache_path(const SubdirIndexLoader& subdir) -> fs::u8path
     {
         // Use similar naming as repodata.json cache but with .msgpack.zst extension
@@ -502,6 +529,36 @@ namespace mamba
         std::size_t shards_ttl
     ) -> expected_t<std::optional<ShardsIndexDict>>
     {
+        // Check cache first: if we have a cached index within TTL, use it directly
+        // without HEAD check or download. This skips network when metadata state
+        // was lost (e.g. fresh shell) but cache file is still valid.
+        fs::u8path cache_path = shard_index_cache_path(subdir);
+        if (fs::exists(cache_path) && shards_ttl > 0)
+        {
+            if (auto age_sec = shard_index_cache_age_seconds(cache_path, subdir.name()))
+            {
+                if (*age_sec >= 0 && static_cast<std::size_t>(*age_sec) <= shards_ttl)
+                {
+                    auto cached_index = parse_shard_index(cache_path);
+                    if (cached_index.has_value())
+                    {
+                        LOG_DEBUG << "Using cached shard index for " << subdir.name()
+                                  << " (within TTL, " << *age_sec << "s old)";
+                        if (Console::can_report_status())
+                        {
+                            std::string label = "Using Cached Shard Index for " + subdir.name();
+                            if (label.length() > 85)
+                            {
+                                label = label.substr(0, 82) + "...";
+                            }
+                            Console::instance().print(fmt::format("{:<85} {:>20}", label, "✔ Done"));
+                        }
+                        return std::optional<ShardsIndexDict>(std::move(cached_index.value()));
+                    }
+                }
+            }
+        }
+
         // Refresh shards availability (HEAD check) if metadata is stale for TTL, then re-check.
         if (!subdir.metadata().has_up_to_date_shards(shards_ttl))
         {
@@ -531,31 +588,38 @@ namespace mamba
             }
         }
 
-        // Check cache first
-        fs::u8path cache_path = shard_index_cache_path(subdir);
+        // Check cache (metadata was fresh; cache may have been outside TTL above)
         if (fs::exists(cache_path))
         {
             auto cached_index = parse_shard_index(cache_path);
             if (cached_index.has_value())
             {
                 LOG_DEBUG << "Using cached shard index for " << subdir.name();
-                std::string label = "Fetch Shards' Index for " + subdir.name();
-                if (label.length() > 85)
+                if (Console::can_report_status())
                 {
-                    label = label.substr(0, 82) + "...";
+                    std::string label = "Using Cached Shard Index for " + subdir.name();
+                    if (label.length() > 85)
+                    {
+                        label = label.substr(0, 82) + "...";
+                    }
+                    Console::instance().print(fmt::format("{:<85} {:>20}", label, "✔ Done"));
                 }
-                Console::instance().print(fmt::format("{:<85} {:>20}", label, "✔ Done"));
                 return std::optional<ShardsIndexDict>(std::move(cached_index.value()));
             }
         }
 
-        // Print message when fetching shard index
-        std::string label = "Fetch Shards' Index for " + subdir.name();
-        if (label.length() > 85)
+        if (Console::can_report_status())
         {
-            label = label.substr(0, 82) + "...";
+            // Print message when fetching shard index
+            std::string label = "Fetch Shard Index for " + subdir.name();
+            if (label.length() > 85)
+            {
+                label = label.substr(0, 82) + "...";
+            }
+
+            Console::instance().print_in_place(fmt::format("{:<85} {:>20}", label, "⧖ Starting"));
         }
-        Console::instance().print(fmt::format("{:<85} {:>20}", label, "⧖ Starting"));
+        const auto started_at = std::chrono::steady_clock::now();
 
         // Build download request
         auto request_opt = build_shard_index_request(
@@ -608,13 +672,6 @@ namespace mamba
             }
 
             // Parse the downloaded file
-            // Reuse label variable from outer scope
-            label = "Fetch Shards' Index for " + subdir.name();
-            if (label.length() > 85)
-            {
-                label = label.substr(0, 82) + "...";
-            }
-            Console::instance().print(fmt::format("{:<85} {:>20}", label, "⧖ Starting"));
             auto index_result = parse_shard_index(downloaded_path);
             if (!index_result.has_value())
             {
@@ -628,12 +685,23 @@ namespace mamba
                 fs::copy_file(downloaded_path, cache_path, fs::copy_options::overwrite_existing);
             }
 
-            // Print final status when done (reuse label variable)
-            if (label.length() > 85)
+            // Print final status when done
+            if (Console::can_report_status())
             {
-                label = label.substr(0, 82) + "...";
+                std::string done_label = "Fetch Shard Index for " + subdir.name();
+                if (done_label.length() > 85)
+                {
+                    done_label = done_label.substr(0, 82) + "...";
+                }
+                Console::instance().print_in_place(
+                    fmt::format(
+                        "{:<85} {:>20}",
+                        done_label,
+                        done_with_duration(std::chrono::steady_clock::now() - started_at)
+                    ),
+                    true
+                );
             }
-            Console::instance().print(fmt::format("{:<85} {:>20}", label, "✔ Done"));
             return std::optional<ShardsIndexDict>(std::move(index_result.value()));
         }
         catch (const std::exception& e)

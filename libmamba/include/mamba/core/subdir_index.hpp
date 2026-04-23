@@ -192,7 +192,31 @@ namespace mamba
         /** Update shards availability from a HEAD check (for TTL). */
         void set_shards_availability(bool value);
 
+        /**
+         * When shard index cache exists and is within TTL, set shards availability.
+         * Call for all subdirs before deciding which need full repodata download,
+         * so subdirs with valid shard index cache are excluded from that download.
+         */
+        void maybe_set_shards_from_cache(const SubdirDownloadParams& params);
+
         void clear_valid_cache_files();
+
+        template <typename First, typename End>
+        static download::MultiRequest
+        build_all_check_requests(First subdirs_first, End subdirs_last, const SubdirDownloadParams& params);
+
+        template <typename First, typename End>
+        static download::MultiRequest
+        build_all_index_requests(First subdirs_first, End subdirs_last, const SubdirDownloadParams& params);
+
+        [[nodiscard]] static expected_t<void> download_requests(
+            download::MultiRequest index_requests,
+            const specs::AuthenticationDataBase& auth_info,
+            const download::mirror_map& mirrors,
+            const download::Options& download_options,
+            const download::RemoteFetchParams& remote_fetch_params,
+            download::Monitor* download_monitor
+        );
 
     private:
 
@@ -245,27 +269,9 @@ namespace mamba
             -> expected_t<void>;
         void refresh_last_write_time(const fs::u8path& json_file, const fs::u8path& solv_file);
 
-        template <typename First, typename End>
-        static auto
-        build_all_check_requests(First subdirs_first, End subdirs_last, const SubdirDownloadParams& params)
-            -> download::MultiRequest;
         auto build_check_requests(const SubdirDownloadParams& params) -> download::MultiRequest;
-
-        template <typename First, typename End>
-        static auto
-        build_all_index_requests(First subdirs_first, End subdirs_last, const SubdirDownloadParams& params)
-            -> download::MultiRequest;
         auto build_index_request(const SubdirDownloadParams& params)
             -> std::optional<download::Request>;
-
-        [[nodiscard]] static auto download_requests(
-            download::MultiRequest index_requests,
-            const specs::AuthenticationDataBase& auth_info,
-            const download::mirror_map& mirrors,
-            const download::Options& download_options,
-            const download::RemoteFetchParams& remote_fetch_params,
-            download::Monitor* download_monitor
-        ) -> expected_t<void>;
     };
 
     /**

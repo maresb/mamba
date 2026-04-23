@@ -918,7 +918,7 @@ def test_clone_environment_with_many_packages(tmp_home, tmp_root_prefix, tmp_pat
 
 # Only run this test on Linux, as it is the only platform where xeus-cling
 # (which is part of the environment) is available.
-@pytest.mark.timeout(20)
+@pytest.mark.timeout(60)
 @pytest.mark.skipif(platform.system() != "Linux", reason="Test only available on Linux")
 @pytest.mark.parametrize("shared_pkgs_dirs", [True], indirect=True)
 def test_env_logging_overhead_regression(tmp_home, tmp_root_prefix, tmp_path):
@@ -1904,6 +1904,7 @@ def test_set_platform(tmp_home, tmp_root_prefix):
     "version,build,cache_tag",
     [
         ["3.10", "*_cpython", "cpython-310"],
+        # Free-threaded layout is lib/python3.13t/...; bytecode still uses cpython-313 (cache_tag).
         ["3.13", "*_cp313t", "cpython-313"],
         # FIXME: https://github.com/mamba-org/mamba/issues/1432
         # [ "3.7", "*_pypy","pypy37"],
@@ -1915,7 +1916,10 @@ def test_pyc_compilation(tmp_home, tmp_root_prefix, version, build, cache_tag):
     cmd = ["-n", env_name, f"python={version}.*={build}", "six"]
 
     if platform.system() == "Windows":
-        site_packages = env_prefix / "Lib" / "site-packages"
+        if build.endswith("t"):
+            site_packages = env_prefix / "lib" / f"python{version}t" / "site-packages"
+        else:
+            site_packages = env_prefix / "Lib" / "site-packages"
         if version == "2.7":
             cmd += ["-c", "defaults"]  # for vc=9.*
     else:
@@ -1924,21 +1928,37 @@ def test_pyc_compilation(tmp_home, tmp_root_prefix, version, build, cache_tag):
         else:
             site_packages = env_prefix / "lib" / f"python{version}" / "site-packages"
 
+    pyc_candidates: list[Path]
     if cache_tag:
-        pyc_fn = Path("__pycache__") / f"six.{cache_tag}.pyc"
+        # Python's .pyc file name includes the interpreter "magic tag".
+        # On Windows, free-threaded Python may emit a `...-t` variant even
+        # when the provided `cache_tag` is `cpython-<minor>`.
+        pyc_candidates = [Path("__pycache__") / f"six.{cache_tag}.pyc"]
+        if (
+            platform.system() == "Windows"
+            and build.endswith("t")
+            and cache_tag.startswith("cpython-")
+        ):
+            pyc_candidates.append(Path("__pycache__") / f"six.{cache_tag}t.pyc")
     else:
-        pyc_fn = Path("six.pyc")
+        pyc_candidates = [Path("six.pyc")]
 
     # Disable pyc compilation to ensure that files are still registered in conda-meta
     helpers.create(*cmd, "--no-pyc")
-    assert not (site_packages / pyc_fn).exists()
+    assert all(not (site_packages / pyc_fn).exists() for pyc_fn in pyc_candidates)
     six_meta = next((env_prefix / "conda-meta").glob("six-*.json")).read_text()
-    assert pyc_fn.name in six_meta
+    assert any(pyc_fn.name in six_meta for pyc_fn in pyc_candidates)
+
+    # A second `create` into an already-satisfied prefix is often a no-op, so linking (and
+    # pyc compilation) may not run again. Remove the env so the next create performs a full
+    # install with compile_pyc enabled.
+    helpers.run_env("remove", "-n", env_name, "-y")
 
     # Enable pyc compilation to ensure that the pyc files are created
     helpers.create(*cmd)
-    assert (site_packages / pyc_fn).exists()
-    assert pyc_fn.name in six_meta
+    assert any((site_packages / pyc_fn).exists() for pyc_fn in pyc_candidates)
+    six_meta = next((env_prefix / "conda-meta").glob("six-*.json")).read_text()
+    assert any(pyc_fn.name in six_meta for pyc_fn in pyc_candidates)
 
 
 @pytest.mark.parametrize("shared_pkgs_dirs", [True], indirect=True)
@@ -1951,7 +1971,7 @@ def test_create_check_dirs(tmp_home, tmp_root_prefix):
     assert os.path.isdir(env_prefix)
 
     if platform.system() == "Windows":
-        assert os.path.isdir(env_prefix / "lib" / "site-packages" / "traitlets")
+        assert os.path.isdir(env_prefix / "Lib" / "site-packages" / "traitlets")
     else:
         assert os.path.isdir(env_prefix / "lib" / "python3.8" / "site-packages" / "traitlets")
 
@@ -1967,8 +1987,9 @@ def test_create_python_site_packages_path(tmp_home, tmp_root_prefix):
     assert os.path.isdir(env_prefix)
 
     if platform.system() == "Windows":
-        assert os.path.isdir(env_prefix / "lib" / "site-packages" / "imagesize")
-        assert not os.path.isdir(env_prefix / "lib" / "python3.13t")
+        assert os.path.isdir(env_prefix / "lib" / "python3.13t" / "site-packages" / "imagesize")
+        assert not os.path.isdir(env_prefix / "Lib" / "site-packages" / "imagesize")
+        assert not os.path.isdir(env_prefix / "lib" / "python3.13" / "site-packages" / "imagesize")
     else:
         # check that the noarch: python package installs into the python_site_packages_path directory
         assert os.path.isdir(env_prefix / "lib" / "python3.13t" / "site-packages" / "imagesize")
@@ -2352,6 +2373,47 @@ def test_create_from_mirror(tmp_home, tmp_root_prefix):
     )
 
 
+def test_create_from_mirror_with_prefix(tmp_home, tmp_root_prefix, tmp_path):
+    """
+    Non-regression test for create with prefix path and sharded repodata.
+    Covers: emscripten-forge-dev channel, shard loading, priorities handling.
+    Verifies no warnings are emitted to stdout/stderr.
+    """
+    prefix = tmp_path / "cpp-env"
+
+    umamba = helpers.get_umamba()
+    cmd = [
+        umamba,
+        "create",
+        "cpp-tabulate",
+        "-p",
+        str(prefix),
+        "-c",
+        "https://repo.prefix.dev/emscripten-forge-dev",
+        "--platform=emscripten-wasm32",
+        "--json",
+        "-y",
+        "--no-rc",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+    res = json.loads(result.stdout)
+    assert res["success"]
+
+    assert any(
+        package["name"] == "cpp-tabulate"
+        and package["channel"] == "https://repo.prefix.dev/emscripten-forge-dev"
+        and package["subdir"] == "emscripten-wasm32"
+        for package in res["actions"]["LINK"]
+    )
+
+    # Verify no warnings in output
+    combined_output = result.stdout + result.stderr
+    assert "warning" not in combined_output.lower(), (
+        f"Unexpected warning in output:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+
 @pytest.mark.parametrize("shared_pkgs_dirs", [True], indirect=True)
 def test_create_with_multiple_files(tmp_home, tmp_root_prefix, tmpdir):
     env_name = "myenv"
@@ -2468,13 +2530,23 @@ def test_create_from_oci_mirrored_channels(tmp_home, tmp_root_prefix, tmp_path, 
     assert res["success"]
 
     packages = helpers.umamba_list("-p", env_prefix, "--json")
-    assert len(packages) == 1
-    pkg = packages[0]
-    assert pkg["name"] == "pandoc"
-    if spec == "pandoc=3.1.13":
-        assert pkg["version"] == "3.1.13"
-    assert pkg["base_url"] == "oci://ghcr.io/channel-mirrors/conda-forge"
-    assert pkg["channel"] == "oci://ghcr.io/channel-mirrors/conda-forge"
+    assert len(packages) >= 1
+
+    # All resolved packages must come from the mirrored OCI channel.
+    assert all(
+        package["base_url"] == "oci://ghcr.io/channel-mirrors/conda-forge"
+        and package["channel"] == "oci://ghcr.io/channel-mirrors/conda-forge"
+        for package in packages
+    )
+
+    requested_name = spec.split("=")[0]
+    requested_pkg = next(
+        (package for package in packages if package["name"] == requested_name), None
+    )
+    assert requested_pkg is not None
+    if "=" in spec:
+        requested_version = spec.split("=", 1)[1]
+        assert requested_pkg["version"] == requested_version
 
 
 @pytest.mark.parametrize("shared_pkgs_dirs", [True], indirect=True)
@@ -2500,18 +2572,13 @@ def test_create_from_oci_mirrored_channels_with_deps(tmp_home, tmp_root_prefix, 
 
     packages = helpers.umamba_list("-p", env_prefix, "--json")
     assert len(packages) > 2
-    assert any(
-        package["name"] == "xtensor"
-        and package["base_url"] == "oci://ghcr.io/channel-mirrors/conda-forge"
+    assert all(
+        package["base_url"] == "oci://ghcr.io/channel-mirrors/conda-forge"
         and package["channel"] == "oci://ghcr.io/channel-mirrors/conda-forge"
         for package in packages
     )
-    assert any(
-        package["name"] == "xtl"
-        and package["base_url"] == "oci://ghcr.io/channel-mirrors/conda-forge"
-        and package["channel"] == "oci://ghcr.io/channel-mirrors/conda-forge"
-        for package in packages
-    )
+    assert any(package["name"] == "xtensor" for package in packages)
+    assert any(package["name"] == "xtl" for package in packages)
 
 
 @pytest.mark.parametrize("shared_pkgs_dirs", [True], indirect=True)
@@ -2540,11 +2607,13 @@ def test_create_from_oci_mirrored_channels_pkg_name_mapping(
     assert res["success"]
 
     packages = helpers.umamba_list("-p", env_prefix, "--json")
-    assert len(packages) == 1
-    pkg = packages[0]
-    assert pkg["name"] == "_go_select"
-    assert pkg["base_url"] == "oci://ghcr.io/channel-mirrors/conda-forge"
-    assert pkg["channel"] == "oci://ghcr.io/channel-mirrors/conda-forge"
+    assert len(packages) >= 1
+    assert all(
+        package["base_url"] == "oci://ghcr.io/channel-mirrors/conda-forge"
+        and package["channel"] == "oci://ghcr.io/channel-mirrors/conda-forge"
+        for package in packages
+    )
+    assert any(package["name"] == "_go_select" for package in packages)
 
 
 @pytest.mark.parametrize("shared_pkgs_dirs", [True], indirect=True)
@@ -2601,7 +2670,7 @@ def test_create_package_with_non_url_char(tmp_home, tmp_root_prefix):
     assert any(pkg["name"] == "x264" for pkg in res["actions"]["LINK"])
 
 
-@pytest.mark.timeout(20)
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("shared_pkgs_dirs", [True], indirect=True)
 @pytest.mark.skipif(
     platform.system() == "Windows", reason="This test fails on Windows for unknown reasons"

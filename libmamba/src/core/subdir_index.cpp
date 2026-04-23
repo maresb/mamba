@@ -5,6 +5,7 @@
 // The full license is in the file LICENSE, distributed with this software.
 
 #include <charconv>
+#include <chrono>
 #include <memory>
 #include <regex>
 #include <stdexcept>
@@ -26,6 +27,11 @@
 
 namespace mamba
 {
+    namespace
+    {
+        constinit const char REPODATA_SHARDS_MSGPACK_ZST[] = "repodata_shards.msgpack.zst";
+    }
+
     /*******************
      * MSubdirMetadata *
      *******************/
@@ -506,6 +512,32 @@ namespace mamba
         m_metadata.set_shards(value);
     }
 
+    void SubdirIndexLoader::maybe_set_shards_from_cache(const SubdirDownloadParams& params)
+    {
+        if (params.repodata_shards_ttl == 0)
+        {
+            return;
+        }
+        if (m_metadata.has_up_to_date_shards(params.repodata_shards_ttl))
+        {
+            return;
+        }
+        fs::u8path cache_path = ShardIndexLoader::shard_index_cache_path(*this);
+        if (!fs::exists(cache_path))
+        {
+            return;
+        }
+        if (auto age_sec = shard_index_cache_age_seconds(cache_path, name()))
+        {
+            if (*age_sec >= 0 && static_cast<std::size_t>(*age_sec) <= params.repodata_shards_ttl)
+            {
+                LOG_DEBUG << "Shard index cache valid for " << name() << " (" << *age_sec
+                          << "s old), skipping full repodata download";
+                set_shards_availability(true);
+            }
+        }
+    }
+
     void SubdirIndexLoader::clear_valid_cache_files()
     {
         if (auto json_path = valid_json_cache_path_unchecked(); fs::is_regular_file(json_path))
@@ -599,7 +631,7 @@ namespace mamba
                 // Don't log if it's a user interruption.
                 if (!result.has_value() and not result.error().is_stop)
                 {
-                    LOG_WARNING << "Failed to load subdir: " << result.error().message;
+                    LOG_DEBUG << "Failed to load subdir: " << result.error().message;
                 }
             }
         }
@@ -640,7 +672,7 @@ namespace mamba
 
     auto SubdirIndexLoader::shard_index_url_path() const -> std::string
     {
-        return util::url_concat(m_platform, "/", "repodata_shards.msgpack.zst");
+        return util::url_concat(m_platform, "/", REPODATA_SHARDS_MSGPACK_ZST);
     }
 
     auto SubdirIndexLoader::valid_json_cache_path_unchecked() const -> fs::u8path
@@ -781,6 +813,14 @@ namespace mamba
     {
         download::MultiRequest request;
 
+        // When shard index cache is valid, we'll use shards and don't need repodata. Skip all
+        // HEAD checks (repodata zst, shards) to avoid unnecessary network requests.
+        maybe_set_shards_from_cache(params);
+        if (m_metadata.has_up_to_date_shards(params.repodata_shards_ttl))
+        {
+            return request;
+        }
+
         if ((!params.offline || caching_is_forbidden()) && params.repodata_check_zst
             && !m_metadata.has_up_to_date_zst())
         {
@@ -819,10 +859,49 @@ namespace mamba
         }
 
         // Add shards HEAD check only when we may use the network (not offline, or cache forbidden
-        // e.g. local channel) and we don't yet have up-to-date shards metadata.
-        if ((!params.offline || caching_is_forbidden()) && !m_metadata.has_up_to_date_shards())
+        // e.g. local channel) and we don't yet have up-to-date shards metadata. Skip the check
+        // when we have a cached shard index within TTL (avoids network when cache is fresh).
+        if ((!params.offline || caching_is_forbidden())
+            && !m_metadata.has_up_to_date_shards(params.repodata_shards_ttl))
         {
-            request.push_back(ShardIndexLoader::build_shards_availability_check_request(*this));
+            if (params.repodata_shards_ttl > 0)
+            {
+                const fs::u8path cache_path = ShardIndexLoader::shard_index_cache_path(*this);
+                if (fs::exists(cache_path))
+                {
+                    if (auto age_sec = shard_index_cache_age_seconds(cache_path, name()))
+                    {
+                        if (*age_sec >= 0
+                            && static_cast<std::size_t>(*age_sec) <= params.repodata_shards_ttl)
+                        {
+                            LOG_DEBUG << "Skipping shards HEAD check for " << name()
+                                      << " (cached index within TTL, " << *age_sec << "s old)";
+                            // Mark shards as available so load_subdir_with_shards is used
+                            set_shards_availability(true);
+                        }
+                        else
+                        {
+                            request.push_back(
+                                ShardIndexLoader::build_shards_availability_check_request(*this)
+                            );
+                        }
+                    }
+                    else
+                    {
+                        request.push_back(
+                            ShardIndexLoader::build_shards_availability_check_request(*this)
+                        );
+                    }
+                }
+                else
+                {
+                    request.push_back(ShardIndexLoader::build_shards_availability_check_request(*this));
+                }
+            }
+            else
+            {
+                request.push_back(ShardIndexLoader::build_shards_availability_check_request(*this));
+            }
         }
         return request;
     }
@@ -878,13 +957,13 @@ namespace mamba
         {
             if (error.transfer.has_value())
             {
-                LOG_WARNING << "Unable to retrieve repodata (response: "
-                            << error.transfer.value().http_status << ") for '"
-                            << error.transfer.value().effective_url << "'";
+                LOG_DEBUG << "Unable to retrieve repodata (response: "
+                          << error.transfer.value().http_status << ") for '"
+                          << error.transfer.value().effective_url << "'";
             }
             else
             {
-                LOG_WARNING << error.message;
+                LOG_DEBUG << error.message;
             }
             if (error.retry_wait_seconds.has_value())
             {

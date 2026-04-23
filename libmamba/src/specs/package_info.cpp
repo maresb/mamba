@@ -5,6 +5,7 @@
 // The full license is in the file LICENSE, distributed with this software.
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <tuple>
 #include <type_traits>
@@ -16,7 +17,9 @@
 
 #include "mamba/specs/archive.hpp"
 #include "mamba/specs/conda_url.hpp"
+#include "mamba/specs/match_spec.hpp"
 #include "mamba/specs/package_info.hpp"
+#include "mamba/specs/version.hpp"
 #include "mamba/util/string.hpp"
 #include "mamba/util/url_manip.hpp"
 
@@ -24,6 +27,19 @@ namespace mamba::specs
 {
     namespace
     {
+        constexpr auto conda_url_defaulted_keys = std::array{
+            defaulted_key::initialized, defaulted_key::build_number, defaulted_key::license,
+            defaulted_key::size,        defaulted_key::timestamp,    defaulted_key::track_features,
+            defaulted_key::depends,     defaulted_key::constrains,
+        };
+
+        constexpr auto wheel_targz_defaulted_keys = std::array{
+            defaulted_key::initialized,  defaulted_key::build,      defaulted_key::build_string,
+            defaulted_key::build_number, defaulted_key::license,    defaulted_key::size,
+            defaulted_key::subdir,       defaulted_key::timestamp,  defaulted_key::track_features,
+            defaulted_key::depends,      defaulted_key::constrains,
+        };
+
         auto parse_extension(std::string_view spec) -> PackageType
         {
             if (util::ends_with(spec, ".whl"))
@@ -95,6 +111,16 @@ namespace mamba::specs
 
                 // Name
                 out.name = head.value();  // There may be '-' in the name
+
+                // See `PackageInfo::defaulted_keys`. Issue #4095.
+                out.defaulted_keys.assign(
+                    conda_url_defaulted_keys.begin(),
+                    conda_url_defaulted_keys.end()
+                );
+                if (out.platform.empty())
+                {
+                    out.defaulted_keys.emplace_back(defaulted_key::subdir);
+                }
             }
             // PackageType::Wheel (.whl):
             // {pkg name}-{version}-{build tag (optional)}-{python tag}-{abi tag}-{platform tag}.whl
@@ -140,6 +166,12 @@ namespace mamba::specs
                     out.version = tail;
                     // The head is the name
                     out.name = head.value();  // There may be '-' in the name
+
+                    // Wheels lack `build` info in filename. See issue #4095.
+                    out.defaulted_keys.assign(
+                        wheel_targz_defaulted_keys.begin(),
+                        wheel_targz_defaulted_keys.end()
+                    );
                 }
                 else
                 {
@@ -156,6 +188,12 @@ namespace mamba::specs
 
                     // Name
                     out.name = head.value();  // There may be '-' in the name
+
+                    // Wheels lack `build` info in filename. See issue #4095.
+                    out.defaulted_keys.assign(
+                        wheel_targz_defaulted_keys.begin(),
+                        wheel_targz_defaulted_keys.end()
+                    );
                 }
             }
             // PackageType::TarGz (.tar.gz): {pkg name}-{version}.tar.gz
@@ -173,6 +211,12 @@ namespace mamba::specs
 
                 // Name
                 out.name = head.value();  // There may be '-' in the name
+
+                // Like wheels: no `build` info in filename. See issue #4095.
+                out.defaulted_keys.assign(
+                    wheel_targz_defaulted_keys.begin(),
+                    wheel_targz_defaulted_keys.end()
+                );
             }
 
             return out;
@@ -247,9 +291,34 @@ namespace mamba::specs
             auto pkg = PackageInfo();
             pkg.package_url = str;
             const std::string pkg_name_marker = "#egg=";
+            bool has_egg_name = false;
             if (const auto idx = str.rfind(pkg_name_marker); idx != std::string_view::npos)
             {
                 pkg.name = str.substr(idx + pkg_name_marker.length());
+                has_egg_name = true;
+            }
+
+            // Git URLs only provide `package_url` and optionally name
+            // (via `#egg=`). See issue #4095.
+            pkg.defaulted_keys = {
+                std::string(defaulted_key::initialized),
+                std::string(defaulted_key::version),
+                std::string(defaulted_key::channel),
+                std::string(defaulted_key::subdir),
+                std::string(defaulted_key::fn),
+                std::string(defaulted_key::build),
+                std::string(defaulted_key::build_string),
+                std::string(defaulted_key::build_number),
+                std::string(defaulted_key::license),
+                std::string(defaulted_key::size),
+                std::string(defaulted_key::timestamp),
+                std::string(defaulted_key::track_features),
+                std::string(defaulted_key::depends),
+                std::string(defaulted_key::constrains),
+            };
+            if (!has_egg_name)
+            {
+                pkg.defaulted_keys.emplace_back(defaulted_key::name);
             }
             return pkg;
         }
@@ -306,7 +375,7 @@ namespace mamba::specs
         // Defaulted keys to empty arrays
         if (dependencies.empty())
         {
-            if (!contains(defaulted_keys, "depends"))
+            if (!contains(defaulted_keys, defaulted_key::depends))
             {
                 j["depends"] = nlohmann::json::array();
             }
@@ -589,5 +658,48 @@ namespace mamba::specs
         // TODO: add more input checks
         // TODO: add checks about members that need to have a valid value
         return fmt::format("{}/{}", channel_mirror_platform_url, filename);
+    }
+
+    void sort_packages_by_version_and_build_desc(std::vector<PackageInfo>& packages)
+    {
+        struct VersionBuildSortKey
+        {
+            std::size_t idx;
+            Version version;
+            std::size_t build_number;
+        };
+
+        std::vector<VersionBuildSortKey> sort_keys;
+        sort_keys.reserve(packages.size());
+        for (std::size_t i = 0; i < packages.size(); ++i)
+        {
+            auto version = Version::parse(packages[i].version).value_or(Version());
+            sort_keys.push_back(VersionBuildSortKey{ i, std::move(version), packages[i].build_number });
+        }
+
+        std::sort(
+            sort_keys.begin(),
+            sort_keys.end(),
+            [](const VersionBuildSortKey& lhs, const VersionBuildSortKey& rhs)
+            {
+                if (rhs.version < lhs.version)
+                {
+                    return true;
+                }
+                if (lhs.version < rhs.version)
+                {
+                    return false;
+                }
+                return lhs.build_number > rhs.build_number;
+            }
+        );
+
+        std::vector<PackageInfo> sorted_packages;
+        sorted_packages.reserve(packages.size());
+        for (const auto& key : sort_keys)
+        {
+            sorted_packages.push_back(std::move(packages[key.idx]));
+        }
+        packages = std::move(sorted_packages);
     }
 }

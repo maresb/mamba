@@ -125,6 +125,15 @@ namespace mamba
 
         static Console& instance();
         static bool is_available();
+        /**
+         * Check if status messages can be reported to stdout.
+         *
+         * Returns true when Console is available, `libmamba` is running from an
+         * end-user executable (`mamba`/`micromamba`), and JSON output is disabled.
+         * Use this before printing status messages to avoid leaking CLI-only
+         * status lines to third-party `libmamba` integrations.
+         */
+        [[nodiscard]] static bool can_report_status();
         static ConsoleStream stream();
         static bool prompt(std::string_view message, char fallback = '_');
         static bool prompt(std::string_view message, char fallback, std::istream& input_stream);
@@ -138,6 +147,7 @@ namespace mamba
         static std::string hide_secrets(std::string_view str);
 
         void print(std::string_view str, bool force_print = false);
+        void print_in_place(std::string_view str, bool finalize = false, bool force_print = false);
         void json_write(const nlohmann::json& j);
         void json_append(const std::string& value);
         void json_append(const nlohmann::json& j);
@@ -152,6 +162,25 @@ namespace mamba
 
         Console(const Context& context);
         ~Console();
+
+        /** Utility to set `"success": false` on destruction of this object
+            when it's destructor is invoked while an exception is in flight.
+
+            This helps avoiding situations where an exception that should be
+            considered a failure of the overall operation is thrown but
+            the json is still set with `"success": true`, while it should be `false`,
+            misleading the testing outputs.
+        */
+        struct JSonFailureOnException
+        {
+            ~JSonFailureOnException()
+            {
+                if (std::uncaught_exceptions() > 0)
+                {
+                    Console::instance().json_write({ { "success", false } });
+                }
+            }
+        };
 
     private:
 

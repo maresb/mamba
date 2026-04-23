@@ -29,6 +29,8 @@
 
 namespace mamba
 {
+    class Console;
+
     enum class VerificationLevel
     {
         Disabled,
@@ -200,6 +202,7 @@ namespace mamba
             return {
                 .offline = this->offline,
                 .repodata_check_zst = this->repodata_use_zst,
+                .repodata_shards_ttl = this->repodata_shards_ttl,
             };
         }
 
@@ -258,6 +261,11 @@ namespace mamba
 
         bool repodata_use_zst = true;
         std::vector<std::string> repodata_has_zst = { "https://conda.anaconda.org/conda-forge" };
+
+        bool repodata_use_shards = true;
+        std::size_t repodata_shards_ttl = 86400;
+        // 0 means: auto (use process-affinity-based concurrency).
+        std::size_t repodata_shards_threads = 0;
 
         // FIXME: Should not be stored here
         // Notice that we cannot build this map directly from mirrored_channels,

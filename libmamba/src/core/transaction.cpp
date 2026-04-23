@@ -35,6 +35,7 @@
 #include "mamba/specs/match_spec.hpp"
 #include "mamba/util/environment.hpp"
 #include "mamba/util/path_manip.hpp"
+#include "mamba/util/string.hpp"
 #include "mamba/util/variant_cmp.hpp"
 
 #include "solver/helpers.hpp"
@@ -130,7 +131,7 @@ namespace mamba
             std::string installed_py_ver = {};
             if (auto pkg = installed_python(database))
             {
-                python_site_packages_path = pkg->python_site_packages_path;
+                python_site_packages_path = effective_python_site_packages_path(*pkg);
                 installed_py_ver = pkg->version;
                 LOG_INFO << "Found python in installed packages " << installed_py_ver;
             }
@@ -139,7 +140,7 @@ namespace mamba
             if (auto py = solver::find_new_python_in_solution(solution))
             {
                 new_py_ver = py->get().version;
-                python_site_packages_path = py->get().python_site_packages_path;
+                python_site_packages_path = effective_python_site_packages_path(py->get());
             }
 
             return {
@@ -367,6 +368,10 @@ namespace mamba
     bool
     MTransaction::execute(const Context& ctx, ChannelContext& channel_context, PrefixData& prefix)
     {
+        // If an exception is thrown in this function, we must consider the whole operation as a
+        // failure.
+        Console::JSonFailureOnException fail_json_on_exception;
+
         // JSON output
         // back to the top level if any action was required
         if (!empty())
@@ -508,6 +513,11 @@ namespace mamba
             m_requested_specs
         );
 
+        const std::vector<std::pair<std::string, std::string>> pip_environment_variables{
+            pip_environment_variables_kv.begin(),
+            pip_environment_variables_kv.end()
+        };
+
         // Helper function to uninstall a pip package
         const auto uninstall_pip_package = [&](const std::string& name)
         {
@@ -520,42 +530,32 @@ namespace mamba
             const std::vector<std::string> full_args{ get_python_path(), "-m", "pip",
                                                       "uninstall",       "-y", name };
 
-            const std::vector<std::pair<std::string, std::string>> env{
-                { "PYTHONIOENCODING", "utf-8" },
-                { "NO_COLOR", "1" },
-                { "PIP_NO_COLOR", "1" },
-            };
+            const auto env = pip_environment_variables;
             reproc::options run_options;
             run_options.env.extra = reproc::env{ env };
             const auto working_dir = ctx.prefix_params.target_prefix.string();
             run_options.working_directory = working_dir.c_str();
 
             std::string out, err;
-            const auto maybe_previous_force_color = util::get_env("FORCE_COLOR");
-            util::unset_env("FORCE_COLOR");
-            on_scope_exit _{ [&]
-                             {
-                                 if (maybe_previous_force_color)
-                                 {
-                                     util::set_env("FORCE_COLOR", maybe_previous_force_color.value());
-                                 }
-                             } };
-
-            auto [status, ec] = reproc::run(
-                full_args,
-                run_options,
-                reproc::sink::string(out),
-                reproc::sink::string(err)
-            );
-
-            if (ec)
             {
-                LOG_WARNING << "Failed to uninstall pip package " << name << ": " << err;
-                // Continue anyway - the package might already be removed or not exist
-            }
-            else
-            {
-                LOG_DEBUG << "Successfully uninstalled pip package " << name;
+                util::ForceColorScope force_color_scope;
+
+                auto [status, ec] = reproc::run(
+                    full_args,
+                    run_options,
+                    reproc::sink::string(out),
+                    reproc::sink::string(err)
+                );
+
+                if (ec)
+                {
+                    LOG_WARNING << "Failed to uninstall pip package " << name << ": " << err;
+                    // Continue anyway - the package might already be removed or not exist
+                }
+                else
+                {
+                    LOG_DEBUG << "Successfully uninstalled pip package " << name;
+                }
             }
         };
 
