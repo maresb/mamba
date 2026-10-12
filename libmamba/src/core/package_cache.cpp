@@ -704,6 +704,10 @@ namespace mamba
 
     void MultiPackageCache::clear_query_cache(const specs::PackageInfo& s)
     {
+        // Extraction workers invalidate different keys in the same maps.
+        // Concurrent erase operations still require synchronization.
+        static std::mutex invalidation_mutex;
+        const std::lock_guard lock(invalidation_mutex);
         const std::string pkg = s.long_str();
         m_cached_tarballs.erase(pkg);
         m_cached_extracted_dirs.erase(pkg);

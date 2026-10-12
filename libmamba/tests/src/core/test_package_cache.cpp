@@ -4,7 +4,9 @@
 //
 // The full license is in the file LICENSE, distributed with this software.
 
+#include <barrier>
 #include <fstream>
+#include <thread>
 
 #include <catch2/catch_all.hpp>
 #include <nlohmann/json.hpp>
@@ -18,6 +20,54 @@
 
 namespace mamba
 {
+    TEST_CASE("PackageCache concurrent extraction invalidation")
+    {
+        TemporaryDirectory temp_dir;
+        const auto params = mambatests::context().validation_params;
+        MultiPackageCache cache({ temp_dir.path() }, params);
+        std::vector<specs::PackageInfo> packages;
+        for (int i = 0; i < 16; ++i)
+        {
+            auto& pkg = packages.emplace_back();
+            pkg.name = "cached-" + std::to_string(i);
+            pkg.version = "1.0";
+            pkg.build_string = "0";
+            pkg.filename = pkg.str() + ".tar.bz2";
+            std::ofstream file((temp_dir.path() / pkg.filename).std_path());
+        }
+
+        // Parallel extraction workers invalidate different keys in the same maps.
+        // Exercise populated maps: erasing from empty maps would hide the race.
+        for (int round = 0; round < 32; ++round)
+        {
+            for (const auto& pkg : packages)
+            {
+                REQUIRE(cache.get_tarball_path(pkg) == temp_dir.path());
+            }
+            std::barrier start(static_cast<std::ptrdiff_t>(packages.size()));
+            std::vector<std::thread> workers;
+            for (std::size_t i = 0; i < packages.size(); ++i)
+            {
+                workers.emplace_back(
+                    [&, i]
+                    {
+                        start.arrive_and_wait();
+                        cache.clear_query_cache(packages[i]);
+                    }
+                );
+            }
+            for (auto& worker : workers)
+            {
+                worker.join();
+            }
+        }
+        for (const auto& pkg : packages)
+        {
+            fs::remove(temp_dir.path() / pkg.filename);
+            REQUIRE(cache.get_tarball_path(pkg).empty());
+        }
+    }
+
     TEST_CASE("PackageCache")
     {
         auto& ctx = mambatests::context();
