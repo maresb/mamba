@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -23,6 +24,7 @@
 #include "mamba/core/shard_traversal.hpp"
 #include "mamba/core/shard_types.hpp"
 #include "mamba/core/subdir_index.hpp"
+#include "mamba/core/util.hpp"
 #include "mamba/solver/libsolv/database.hpp"
 #include "mamba/solver/libsolv/repo_info.hpp"
 #include "mamba/specs/error.hpp"
@@ -108,12 +110,11 @@ namespace mamba
             print_done_status_line("Parsing Packages' Records", elapsed);
         }
 
-        auto create_repo_from_pkgs_dir(
-            const Context& ctx,
+        auto read_package_cache(
             ChannelContext& channel_context,
             solver::libsolv::Database& database,
             const fs::u8path& pkgs_dir
-        ) -> solver::libsolv::RepoInfo
+        ) -> PrefixData
         {
             if (!fs::exists(pkgs_dir))
             {
@@ -134,9 +135,34 @@ namespace mamba
                 {
                     continue;
                 }
+                std::ifstream record_file = open_ifstream(repodata_record_json);
+                nlohmann::json record_json;
+                record_file >> record_json;
+                const auto cached = record_json.get<specs::PackageInfo>();
+                bool in_channel = false;
+                database.for_each_package_matching(
+                    specs::MatchSpec::parse(cached.name).value(),
+                    [&](const specs::PackageInfo& candidate)
+                    {
+                        // Do not give a second, cache-derived copy of an artifact
+                        // precedence over its channel record during offline solves.
+                        const bool same_digest = (!cached.sha256.empty()
+                                                  && cached.sha256 == candidate.sha256)
+                                                 || (!cached.md5.empty()
+                                                     && cached.md5 == candidate.md5);
+                        if (same_digest && cached.package_url == candidate.package_url)
+                        {
+                            in_channel = true;
+                        }
+                    }
+                );
+                if (in_channel)
+                {
+                    continue;
+                }
                 prefix_data.load_single_record(repodata_record_json);
             }
-            return load_installed_packages_in_database(ctx, database, prefix_data);
+            return std::move(prefix_data);
         }
 
         auto build_packages_by_url_from_subset(
@@ -748,7 +774,7 @@ namespace mamba
          * Add repos from local `pkgs_dir` when operating in offline mode.
          *
          * This is a no-op unless `ctx.offline` is true. In that case, it iterates over
-         * all configured `pkgs_dirs` and calls `create_repo_from_pkgs_dir` for each.
+         * all configured `pkgs_dirs`, excluding records superseded by channel metadata.
          */
         void add_repos_from_pks_dir(
             Context& ctx,
@@ -762,9 +788,16 @@ namespace mamba
             }
 
             LOG_INFO << "Creating repo from pkgs_dir for offline";
+            std::vector<PrefixData> cached_prefixes;
             for (const auto& c : ctx.pkgs_dirs)
             {
-                create_repo_from_pkgs_dir(ctx, channel_context, database, c);
+                cached_prefixes.push_back(read_package_cache(channel_context, database, c));
+            }
+            // Compare every cache against the channel database before adding any
+            // fallback records, so one package cache cannot verify another.
+            for (const auto& prefix : cached_prefixes)
+            {
+                load_installed_packages_in_database(ctx, database, prefix);
             }
         }
 
@@ -1093,8 +1126,6 @@ namespace mamba
                 return download_status;
             }
 
-            add_repos_from_pks_dir(ctx, channel_context, database);
-
             std::vector<std::string> effective_shard_root_packages(root_packages);
             bool loading_failed = load_all_subdirs(
                 ctx,
@@ -1107,6 +1138,9 @@ namespace mamba
                 error_list,
                 python_minor_version_for_prefilter
             );
+
+            // Load channel records before considering extracted-package fallbacks.
+            add_repos_from_pks_dir(ctx, channel_context, database);
 
             if (loading_failed)
             {
