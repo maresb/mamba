@@ -23,6 +23,8 @@
 #include "mamba/util/string.hpp"
 #include "mamba/validation/tools.hpp"
 
+#include "solver/libsolv/helpers.hpp"
+
 namespace mamba
 {
     auto package_cache_folder_relative_path(const specs::PackageInfo& s) -> fs::u8path
@@ -492,6 +494,50 @@ namespace mamba
 
                 if (valid)
                 {
+                    // A checksum validates the artifact, not its separately stored
+                    // dependency metadata. Re-extract stale records using the selected
+                    // package's metadata, including intentionally empty channel patches.
+                    // URL-only installs have no authoritative values for defaulted fields.
+                    if (std::ranges::find(s.defaulted_keys, specs::defaulted_key::initialized)
+                        != s.defaulted_keys.end())
+                    {
+                        const nlohmann::json selected = s;
+                        const nlohmann::json cached_values = repodata_record.get<specs::PackageInfo>();
+                        for (const auto* field : { "depends",
+                                                   "constrains",
+                                                   "license",
+                                                   "timestamp",
+                                                   "build_number",
+                                                   "track_features" })
+                        {
+                            if (std::ranges::find(s.defaulted_keys, field) != s.defaulted_keys.end())
+                            {
+                                continue;
+                            }
+                            auto expected = selected.value(field, nlohmann::json());
+                            auto cached = cached_values.value(field, nlohmann::json());
+                            if (std::string_view(field) == "timestamp")
+                            {
+                                expected = solver::libsolv::normalize_conda_timestamp(
+                                    expected.get<std::uint64_t>()
+                                );
+                                cached = solver::libsolv::normalize_conda_timestamp(
+                                    cached.get<std::uint64_t>()
+                                );
+                            }
+                            if (expected.is_array() && cached.is_array())
+                            {
+                                std::sort(expected.begin(), expected.end());
+                                std::sort(cached.begin(), cached.end());
+                            }
+                            if (expected != cached)
+                            {
+                                LOG_DEBUG << "Cached metadata for '" << s.name << "' differs in "
+                                          << field << "; re-extracting with selected metadata";
+                                return false;
+                            }
+                        }
+                    }
                     valid = validate(extracted_dir, params);
                 }
                 return valid;
