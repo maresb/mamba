@@ -18,6 +18,11 @@
 namespace mamba
 {
 
+    // With no authoritative channel record, recover the historical empty
+    // timestamp/license pattern using the fresh explicit-install metadata path.
+    // Returns a usable extraction, persisted to a writable cache when repaired.
+    auto recover_cached_package(const fs::u8path& extracted, MultiPackageCache& caches) -> fs::u8path;
+
     class PackageFetcher;
 
     enum class PackageExtractEvent

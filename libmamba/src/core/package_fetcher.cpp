@@ -469,99 +469,277 @@ namespace mamba
         return res;
     }
 
+    namespace
+    {
+        // Shared by fresh extraction and legacy-cache recovery. URL-derived
+        // placeholders are replaced wholesale; selected channel fields take precedence.
+        auto make_repodata_record(
+            const specs::PackageInfo& package_info,
+            const nlohmann::json& index,
+            const fs::u8path& archive_path,
+            std::size_t retained_size = 0
+        ) -> nlohmann::json
+        {
+            nlohmann::json repodata_record = package_info;
+
+            // `from_json()` does NOT set `_initialized` because it deserializes
+            // already-written cache files for display/query purposes. Those `PackageInfo`
+            // objects are never passed to this function — they're used for `mamba list`,
+            // dependency computation, etc.
+            // See `PackageInfo::defaulted_keys`. Issue #4095.
+            const bool contains_initialized = std::ranges::find(
+                                                  package_info.defaulted_keys,
+                                                  specs::defaulted_key::initialized
+                                              )
+                                              != package_info.defaulted_keys.end();
+            if (!contains_initialized)
+            {
+                throw std::logic_error(
+                    "`PackageInfo` missing `_initialized` sentinel in `defaulted_keys`. "
+                    "This indicates a bug in the code path that created this `PackageInfo`. "
+                    "See GitHub issue #4095."
+                );
+            }
+
+            // - URL-derived packages: listed fields have stub values (0, "", [])
+            //   → erase them so `index.json` provides correct values
+            // - Solver-derived packages: only `_initialized` in list
+            //   → nothing erased, all fields preserved (including channel patches)
+            for (const auto& key : package_info.defaulted_keys)
+            {
+                if (key != specs::defaulted_key::initialized)
+                {
+                    repodata_record.erase(key);
+                }
+            }
+
+            // `insert()` only adds MISSING keys — solver-derived fields (including
+            // channel patches with intentionally empty arrays) are preserved.
+            repodata_record.insert(index.cbegin(), index.cend());
+
+            if (repodata_record.find("size") == repodata_record.end() || repodata_record["size"] == 0)
+            {
+                repodata_record["size"] = archive_path.empty() ? retained_size
+                                                               : fs::file_size(archive_path);
+            }
+
+            // Matches conda behavior where `depends` and `constrains` are always present.
+            // Some packages (like `nlohmann_json-abi`) don't have `depends` in `index.json`.
+            if (!repodata_record.contains("depends"))
+            {
+                repodata_record["depends"] = nlohmann::json::array();
+            }
+            if (!repodata_record.contains("constrains"))
+            {
+                repodata_record["constrains"] = nlohmann::json::array();
+            }
+
+            // Matches conda behavior: omit `track_features` when empty to reduce JSON noise.
+            if (repodata_record.contains("track_features"))
+            {
+                const auto& tf = repodata_record["track_features"];
+                bool is_empty = tf.is_null() || (tf.is_string() && tf.get<std::string>().empty())
+                                || (tf.is_array() && tf.empty());
+                if (is_empty)
+                {
+                    repodata_record.erase("track_features");
+                }
+            }
+
+            // Compute missing checksums from tarball. Issue #4095.
+            auto needs_checksum = [&repodata_record](std::string_view key)
+            {
+                return !repodata_record.contains(key) || !repodata_record[key].is_string()
+                       || repodata_record[key].get<std::string>().empty();
+            };
+
+            if (!archive_path.empty() && needs_checksum("md5"))
+            {
+                repodata_record["md5"] = validation::md5sum(archive_path);
+            }
+
+            if (!archive_path.empty() && needs_checksum("sha256"))
+            {
+                repodata_record["sha256"] = validation::sha256sum(archive_path);
+            }
+
+            return repodata_record;
+        }
+
+        auto read_json(const fs::u8path& path) -> nlohmann::json
+        {
+            auto input = open_ifstream(path);
+            return nlohmann::json::parse(input);
+        }
+
+        void write_json(const fs::u8path& path, const nlohmann::json& record)
+        {
+            std::ofstream output;
+            output.exceptions(std::ios::failbit | std::ios::badbit);
+            output.open(path.std_path());
+            output << record.dump(4);
+            output.close();
+        }
+
+        auto recovery_index(const fs::u8path& extracted, const specs::PackageInfo& package)
+            -> nlohmann::json
+        {
+            auto index = read_json(extracted / "info" / "index.json");
+            const auto metadata = index.get<specs::PackageInfo>();
+            if (metadata.name != package.name || metadata.version != package.version
+                || metadata.build_string != package.build_string
+                || (!metadata.platform.empty() && !package.platform.empty()
+                    && metadata.platform != package.platform))
+            {
+                throw std::runtime_error("Package index identity does not match the cached artifact");
+            }
+            return index;
+        }
+
+        void copy_extracted_package(const fs::u8path& source, const fs::u8path& destination)
+        {
+            fs::create_directories(destination);
+            for (const auto& entry : fs::recursive_directory_iterator(source))
+            {
+                const auto target = destination / entry.path().lexically_relative(source);
+                if (fs::is_directory(entry.symlink_status()))
+                {
+                    // Create writable directories even when the source cache is read-only.
+                    fs::create_directories(target);
+                }
+                else
+                {
+                    fs::copy(entry.path(), target, fs::copy_options::copy_symlinks);
+                }
+            }
+        }
+    }
+
     void PackageFetcher::write_repodata_record(const fs::u8path& base_path) const
     {
-        const fs::u8path repodata_record_path = base_path / "info" / "repodata_record.json";
-        const fs::u8path index_path = base_path / "info" / "index.json";
+        write_json(
+            base_path / "info" / "repodata_record.json",
+            make_repodata_record(m_package_info, read_json(base_path / "info" / "index.json"), m_tarball_path)
+        );
+    }
 
-        nlohmann::json index;
-        std::ifstream index_file = open_ifstream(index_path);
-        index_file >> index;
-
-        nlohmann::json repodata_record = m_package_info;
-
-        // `from_json()` does NOT set `_initialized` because it deserializes
-        // already-written cache files for display/query purposes. Those `PackageInfo`
-        // objects are never passed to this function — they're used for `mamba list`,
-        // dependency computation, etc.
-        // See `PackageInfo::defaulted_keys`. Issue #4095.
-        const bool contains_initialized = std::ranges::find(
-                                              m_package_info.defaulted_keys,
-                                              specs::defaulted_key::initialized
-                                          )
-                                          != m_package_info.defaulted_keys.end();
-        if (!contains_initialized)
+    auto recover_cached_package(const fs::u8path& extracted, MultiPackageCache& caches) -> fs::u8path
+    {
+        const auto original = read_json(extracted / "info" / "repodata_record.json");
+        const auto cached = original.get<specs::PackageInfo>();
+        if (cached.timestamp != 0 || !cached.license.empty())
         {
-            throw std::logic_error(
-                "`PackageInfo` missing `_initialized` sentinel in `defaulted_keys`. "
-                "This indicates a bug in the code path that created this `PackageInfo`. "
-                "See GitHub issue #4095."
+            return extracted;
+        }
+
+        // Recreate the same URL-derived input used by a fresh explicit install.
+        // Do not infer which individual dependency/constraint fields survived.
+        auto package = specs::PackageInfo::from_url(cached.package_url).value();
+        package.md5 = cached.md5;
+        package.sha256 = cached.sha256;
+        nlohmann::json index;
+        nlohmann::json recovered;
+        bool have_index = false;
+        try
+        {
+            index = recovery_index(extracted, package);
+            recovered = make_repodata_record(package, index, {}, cached.size);
+            have_index = true;
+        }
+        catch (const std::exception&)
+        {
+            // An unavailable or malformed extracted index may be recovered from
+            // a retained, validated archive. This path never downloads repodata.
+        }
+        if (have_index && cached == recovered.get<specs::PackageInfo>())
+        {
+            // Legitimate old packages can have empty license/timestamp fields.
+            // Matching as-built metadata needs no repair, even in a read-only cache.
+            return extracted;
+        }
+
+        auto writable = caches.first_writable_path();
+        if (writable.empty())
+        {
+            throw std::runtime_error(
+                "Cannot recover cached metadata for '" + cached.name
+                + "': no package cache is writable. Add a writable directory to pkgs_dirs "
+                  "in your Mamba configuration (or set CONDA_PKGS_DIRS) and retry. "
+                  "The original package cache has not been changed."
             );
         }
-
-        // - URL-derived packages: listed fields have stub values (0, "", [])
-        //   → erase them so `index.json` provides correct values
-        // - Solver-derived packages: only `_initialized` in list
-        //   → nothing erased, all fields preserved (including channel patches)
-        for (const auto& key : m_package_info.defaulted_keys)
+        LockFile lock(writable);
+        if (!lock)
         {
-            if (key != specs::defaulted_key::initialized)
+            throw std::runtime_error("Cannot lock writable package cache for metadata recovery");
+        }
+        const auto parent = writable / package_cache_folder_relative_path(package);
+        fs::create_directories(parent);
+        const auto destination = parent / specs::strip_archive_extension(package.filename);
+        const auto staging = parent / (".mamba-recovery-" + package.str());
+        fs::remove_all(staging);
+        try
+        {
+            if (!have_index)
             {
-                repodata_record.erase(key);
+                const auto archive_dir = caches.get_tarball_path(package);
+                if (archive_dir.empty())
+                {
+                    throw std::runtime_error("No usable retained archive");
+                }
+                mamba::extract(archive_dir / package.filename, staging, ExtractOptions{});
+                index = recovery_index(staging, package);
+                recovered = make_repodata_record(
+                    package,
+                    index,
+                    archive_dir / package.filename,
+                    cached.size
+                );
             }
-        }
-
-        // `insert()` only adds MISSING keys — solver-derived fields (including
-        // channel patches with intentionally empty arrays) are preserved.
-        repodata_record.insert(index.cbegin(), index.cend());
-
-        if (repodata_record.find("size") == repodata_record.end() || repodata_record["size"] == 0)
-        {
-            repodata_record["size"] = fs::file_size(m_tarball_path);
-        }
-
-        // Matches conda behavior where `depends` and `constrains` are always present.
-        // Some packages (like `nlohmann_json-abi`) don't have `depends` in `index.json`.
-        if (!repodata_record.contains("depends"))
-        {
-            repodata_record["depends"] = nlohmann::json::array();
-        }
-        if (!repodata_record.contains("constrains"))
-        {
-            repodata_record["constrains"] = nlohmann::json::array();
-        }
-
-        // Matches conda behavior: omit `track_features` when empty to reduce JSON noise.
-        if (repodata_record.contains("track_features"))
-        {
-            const auto& tf = repodata_record["track_features"];
-            bool is_empty = tf.is_null() || (tf.is_string() && tf.get<std::string>().empty())
-                            || (tf.is_array() && tf.empty());
-            if (is_empty)
+            // A previous operation may already have repaired a copy while
+            // leaving this legacy flat entry unchanged. A malformed corrected
+            // copy can be rebuilt from the same local sources.
+            bool already_recovered = false;
+            try
             {
-                repodata_record.erase("track_features");
+                const auto existing = destination / "info" / "repodata_record.json";
+                already_recovered = fs::exists(existing) && read_json(existing) == recovered;
             }
+            catch (const std::exception&)
+            {
+            }
+            if (already_recovered)
+            {
+                fs::remove_all(staging);
+                return destination;
+            }
+            if (have_index)
+            {
+                copy_extracted_package(extracted, staging);
+            }
+            const auto record = staging / "info" / "repodata_record.json";
+            fs::remove(record);  // The copied source file may be read-only.
+            write_json(record, recovered);
+            fs::remove_all(destination);
+            fs::rename(staging, destination);
         }
-
-        // Compute missing checksums from tarball. Issue #4095.
-        auto needs_checksum = [&repodata_record](std::string_view key)
+        catch (const std::exception& error)
         {
-            return !repodata_record.contains(key) || !repodata_record[key].is_string()
-                   || repodata_record[key].get<std::string>().empty();
-        };
-
-        if (needs_checksum("md5"))
-        {
-            repodata_record["md5"] = validation::md5sum(m_tarball_path);
+            fs::remove_all(staging);
+            throw std::runtime_error(
+                "Cannot recover cached metadata for '" + cached.name
+                + "' from its extracted index.json or retained archive. "
+                  "Restore the matching package archive to a writable package cache and retry. "
+                  "Also check cache permissions and free disk space. Recovery error: "
+                + error.what()
+            );
         }
-
-        if (needs_checksum("sha256"))
-        {
-            repodata_record["sha256"] = validation::sha256sum(m_tarball_path);
-        }
-
-        std::ofstream repodata_record_file(repodata_record_path.std_path());
-        repodata_record_file << repodata_record.dump(4);
+        caches.clear_query_cache(package);
+        LOG_WARNING << "Recovered cached metadata for '" << cached.name
+                    << "' from the package's original metadata in a writable cache. "
+                       "Channel-only corrections could not be verified. "
+                       "The legacy cache entry was not changed.";
+        return destination;
     }
 
     namespace
