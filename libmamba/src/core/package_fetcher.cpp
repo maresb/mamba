@@ -469,99 +469,126 @@ namespace mamba
         return res;
     }
 
+    namespace
+    {
+        // Shared by fresh extraction and legacy-cache recovery. URL-derived
+        // placeholders are replaced wholesale; selected channel fields take precedence.
+        auto make_repodata_record(
+            const specs::PackageInfo& package_info,
+            const nlohmann::json& index,
+            const fs::u8path& archive_path,
+            std::size_t retained_size = 0
+        ) -> nlohmann::json
+        {
+            nlohmann::json repodata_record = package_info;
+
+            // `from_json()` does NOT set `_initialized` because it deserializes
+            // already-written cache files for display/query purposes. Those `PackageInfo`
+            // objects are never passed to this function — they're used for `mamba list`,
+            // dependency computation, etc.
+            // See `PackageInfo::defaulted_keys`. Issue #4095.
+            const bool contains_initialized = std::ranges::find(
+                                                  package_info.defaulted_keys,
+                                                  specs::defaulted_key::initialized
+                                              )
+                                              != package_info.defaulted_keys.end();
+            if (!contains_initialized)
+            {
+                throw std::logic_error(
+                    "`PackageInfo` missing `_initialized` sentinel in `defaulted_keys`. "
+                    "This indicates a bug in the code path that created this `PackageInfo`. "
+                    "See GitHub issue #4095."
+                );
+            }
+
+            // - URL-derived packages: listed fields have stub values (0, "", [])
+            //   → erase them so `index.json` provides correct values
+            // - Solver-derived packages: only `_initialized` in list
+            //   → nothing erased, all fields preserved (including channel patches)
+            for (const auto& key : package_info.defaulted_keys)
+            {
+                if (key != specs::defaulted_key::initialized)
+                {
+                    repodata_record.erase(key);
+                }
+            }
+
+            // `insert()` only adds MISSING keys — solver-derived fields (including
+            // channel patches with intentionally empty arrays) are preserved.
+            repodata_record.insert(index.cbegin(), index.cend());
+
+            if (repodata_record.find("size") == repodata_record.end() || repodata_record["size"] == 0)
+            {
+                repodata_record["size"] = archive_path.empty() ? retained_size
+                                                               : fs::file_size(archive_path);
+            }
+
+            // Matches conda behavior where `depends` and `constrains` are always present.
+            // Some packages (like `nlohmann_json-abi`) don't have `depends` in `index.json`.
+            if (!repodata_record.contains("depends"))
+            {
+                repodata_record["depends"] = nlohmann::json::array();
+            }
+            if (!repodata_record.contains("constrains"))
+            {
+                repodata_record["constrains"] = nlohmann::json::array();
+            }
+
+            // Matches conda behavior: omit `track_features` when empty to reduce JSON noise.
+            if (repodata_record.contains("track_features"))
+            {
+                const auto& tf = repodata_record["track_features"];
+                bool is_empty = tf.is_null() || (tf.is_string() && tf.get<std::string>().empty())
+                                || (tf.is_array() && tf.empty());
+                if (is_empty)
+                {
+                    repodata_record.erase("track_features");
+                }
+            }
+
+            // Compute missing checksums from tarball. Issue #4095.
+            auto needs_checksum = [&repodata_record](std::string_view key)
+            {
+                return !repodata_record.contains(key) || !repodata_record[key].is_string()
+                       || repodata_record[key].get<std::string>().empty();
+            };
+
+            if (!archive_path.empty() && needs_checksum("md5"))
+            {
+                repodata_record["md5"] = validation::md5sum(archive_path);
+            }
+
+            if (!archive_path.empty() && needs_checksum("sha256"))
+            {
+                repodata_record["sha256"] = validation::sha256sum(archive_path);
+            }
+
+            return repodata_record;
+        }
+
+        auto read_json(const fs::u8path& path) -> nlohmann::json
+        {
+            auto input = open_ifstream(path);
+            return nlohmann::json::parse(input);
+        }
+
+        void write_json(const fs::u8path& path, const nlohmann::json& record)
+        {
+            std::ofstream output;
+            output.exceptions(std::ios::failbit | std::ios::badbit);
+            output.open(path.std_path());
+            output << record.dump(4);
+            output.close();
+        }
+
+    }
+
     void PackageFetcher::write_repodata_record(const fs::u8path& base_path) const
     {
-        const fs::u8path repodata_record_path = base_path / "info" / "repodata_record.json";
-        const fs::u8path index_path = base_path / "info" / "index.json";
-
-        nlohmann::json index;
-        std::ifstream index_file = open_ifstream(index_path);
-        index_file >> index;
-
-        nlohmann::json repodata_record = m_package_info;
-
-        // `from_json()` does NOT set `_initialized` because it deserializes
-        // already-written cache files for display/query purposes. Those `PackageInfo`
-        // objects are never passed to this function — they're used for `mamba list`,
-        // dependency computation, etc.
-        // See `PackageInfo::defaulted_keys`. Issue #4095.
-        const bool contains_initialized = std::ranges::find(
-                                              m_package_info.defaulted_keys,
-                                              specs::defaulted_key::initialized
-                                          )
-                                          != m_package_info.defaulted_keys.end();
-        if (!contains_initialized)
-        {
-            throw std::logic_error(
-                "`PackageInfo` missing `_initialized` sentinel in `defaulted_keys`. "
-                "This indicates a bug in the code path that created this `PackageInfo`. "
-                "See GitHub issue #4095."
-            );
-        }
-
-        // - URL-derived packages: listed fields have stub values (0, "", [])
-        //   → erase them so `index.json` provides correct values
-        // - Solver-derived packages: only `_initialized` in list
-        //   → nothing erased, all fields preserved (including channel patches)
-        for (const auto& key : m_package_info.defaulted_keys)
-        {
-            if (key != specs::defaulted_key::initialized)
-            {
-                repodata_record.erase(key);
-            }
-        }
-
-        // `insert()` only adds MISSING keys — solver-derived fields (including
-        // channel patches with intentionally empty arrays) are preserved.
-        repodata_record.insert(index.cbegin(), index.cend());
-
-        if (repodata_record.find("size") == repodata_record.end() || repodata_record["size"] == 0)
-        {
-            repodata_record["size"] = fs::file_size(m_tarball_path);
-        }
-
-        // Matches conda behavior where `depends` and `constrains` are always present.
-        // Some packages (like `nlohmann_json-abi`) don't have `depends` in `index.json`.
-        if (!repodata_record.contains("depends"))
-        {
-            repodata_record["depends"] = nlohmann::json::array();
-        }
-        if (!repodata_record.contains("constrains"))
-        {
-            repodata_record["constrains"] = nlohmann::json::array();
-        }
-
-        // Matches conda behavior: omit `track_features` when empty to reduce JSON noise.
-        if (repodata_record.contains("track_features"))
-        {
-            const auto& tf = repodata_record["track_features"];
-            bool is_empty = tf.is_null() || (tf.is_string() && tf.get<std::string>().empty())
-                            || (tf.is_array() && tf.empty());
-            if (is_empty)
-            {
-                repodata_record.erase("track_features");
-            }
-        }
-
-        // Compute missing checksums from tarball. Issue #4095.
-        auto needs_checksum = [&repodata_record](std::string_view key)
-        {
-            return !repodata_record.contains(key) || !repodata_record[key].is_string()
-                   || repodata_record[key].get<std::string>().empty();
-        };
-
-        if (needs_checksum("md5"))
-        {
-            repodata_record["md5"] = validation::md5sum(m_tarball_path);
-        }
-
-        if (needs_checksum("sha256"))
-        {
-            repodata_record["sha256"] = validation::sha256sum(m_tarball_path);
-        }
-
-        std::ofstream repodata_record_file(repodata_record_path.std_path());
-        repodata_record_file << repodata_record.dump(4);
+        write_json(
+            base_path / "info" / "repodata_record.json",
+            make_repodata_record(m_package_info, read_json(base_path / "info" / "index.json"), m_tarball_path)
+        );
     }
 
     namespace
