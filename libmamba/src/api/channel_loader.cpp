@@ -19,6 +19,7 @@
 #include "mamba/core/download_progress_bar.hpp"
 #include "mamba/core/output.hpp"
 #include "mamba/core/package_database_loader.hpp"
+#include "mamba/core/package_fetcher.hpp"
 #include "mamba/core/prefix_data.hpp"
 #include "mamba/core/shard_index_loader.hpp"
 #include "mamba/core/shard_traversal.hpp"
@@ -113,7 +114,8 @@ namespace mamba
         auto read_package_cache(
             ChannelContext& channel_context,
             solver::libsolv::Database& database,
-            const fs::u8path& pkgs_dir
+            const fs::u8path& pkgs_dir,
+            MultiPackageCache& package_caches
         ) -> PrefixData
         {
             if (!fs::exists(pkgs_dir))
@@ -160,7 +162,8 @@ namespace mamba
                 {
                     continue;
                 }
-                prefix_data.load_single_record(repodata_record_json);
+                const auto recovered = recover_cached_package(entry.path(), package_caches);
+                prefix_data.load_single_record(recovered / "info" / "repodata_record.json");
             }
             return std::move(prefix_data);
         }
@@ -779,7 +782,8 @@ namespace mamba
         void add_repos_from_pks_dir(
             Context& ctx,
             ChannelContext& channel_context,
-            solver::libsolv::Database& database
+            solver::libsolv::Database& database,
+            MultiPackageCache& package_caches
         )
         {
             if (!ctx.offline)
@@ -791,7 +795,9 @@ namespace mamba
             std::vector<PrefixData> cached_prefixes;
             for (const auto& c : ctx.pkgs_dirs)
             {
-                cached_prefixes.push_back(read_package_cache(channel_context, database, c));
+                cached_prefixes.push_back(
+                    read_package_cache(channel_context, database, c, package_caches)
+                );
             }
             // Compare every cache against the channel database before adding any
             // fallback records, so one package cache cannot verify another.
@@ -1140,7 +1146,7 @@ namespace mamba
             );
 
             // Load channel records before considering extracted-package fallbacks.
-            add_repos_from_pks_dir(ctx, channel_context, database);
+            add_repos_from_pks_dir(ctx, channel_context, database, package_caches);
 
             if (loading_failed)
             {

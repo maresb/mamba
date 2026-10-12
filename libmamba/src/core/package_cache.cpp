@@ -16,6 +16,7 @@
 #include "mamba/core/context.hpp"
 #include "mamba/core/output.hpp"
 #include "mamba/core/package_cache.hpp"
+#include "mamba/core/package_fetcher.hpp"
 #include "mamba/core/package_handling.hpp"
 #include "mamba/core/util.hpp"
 #include "mamba/specs/archive.hpp"
@@ -712,6 +713,13 @@ namespace mamba
                 if (!fs::exists(path / s.str() / "info" / "repodata_record.json"))
                 {
                     path = c.path();
+                }
+                if (std::ranges::find(s.defaulted_keys, specs::defaulted_key::depends)
+                    != s.defaulted_keys.end())
+                {
+                    // URL-only transactions have no channel dependency record.
+                    // Recover before any fetcher or linker can reuse this extraction.
+                    path = recover_cached_package(path / s.str(), *this).parent_path();
                 }
                 m_cached_extracted_dirs[pkg] = path;
                 return path;
